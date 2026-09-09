@@ -89,17 +89,19 @@ export function FileUploader() {
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95 }}
-            {...getRootProps()}
-            className={`
-              w-full p-12 rounded-3xl cursor-pointer transition-all duration-300
-              flex flex-col items-center justify-center gap-4
-              ${isDragActive 
-                ? 'shadow-[var(--shadow-neu-inset)] bg-[#e6e6fa]/10 border-2 border-primary/50' 
-                : 'shadow-[var(--shadow-neu)] bg-background hover:shadow-[var(--shadow-neu-hover)]'
-              }
-            `}
           >
-            <input {...getInputProps()} />
+            <div
+              {...getRootProps()}
+              className={`
+                w-full p-12 rounded-3xl cursor-pointer transition-all duration-300
+                flex flex-col items-center justify-center gap-4
+                ${isDragActive 
+                  ? 'shadow-[var(--shadow-neu-inset)] bg-[#e6e6fa]/10 border-2 border-primary/50' 
+                  : 'shadow-[var(--shadow-neu)] bg-background hover:shadow-[var(--shadow-neu-hover)]'
+                }
+              `}
+            >
+              <input {...getInputProps()} />
             <div className="w-20 h-20 rounded-full bg-background shadow-[var(--shadow-neu)] flex items-center justify-center text-primary mb-4">
               <UploadCloud className="w-10 h-10" />
             </div>
@@ -109,6 +111,7 @@ export function FileUploader() {
             <p className="text-gray-500">
               or click to browse from your device
             </p>
+            </div>
           </motion.div>
         ) : (
           <motion.div

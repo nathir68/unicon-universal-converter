@@ -5,10 +5,10 @@ import { existsSync } from 'fs';
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { filename: string } }
+  { params }: { params: Promise<{ filename: string }> }
 ) {
   try {
-    const filename = params.filename;
+    const { filename } = await params;
     if (!filename || filename.includes('..')) {
       return new NextResponse('Invalid filename', { status: 400 });
     }
