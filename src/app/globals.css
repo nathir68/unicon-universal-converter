@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+@variant dark (&:where(.dark, .dark *));
+
+:root {
+  /* 70% LAVENDER (Base Background & Elements) */
+  --background: #dcdcf2; 
+  /* 10% GREY (Text, Icons, Dark Shadows) */
+  --foreground: #4B5563; 
+  
+  /* 20% WHITE (Highlights, Inner elements, Text on primary) */
+  --neu-light: #ffffff;
+  --neu-dark: #b8b8d4; 
+  
+  /* ACCENTS */
+  --primary: #8b5cf6;
+  --primary-dark: #7c3aed;
+}
+
+.dark {
+  /* DARK GREY-LAVENDER BACKGROUND */
+  --background: #2a2a35;
+  --foreground: #e2e8f0; /* WHITE-ISH TEXT */
+  
+  /* NEUMORPHIC SHADOWS FOR DARK */
+  --neu-light: #383846;
+  --neu-dark: #1c1c24;
+  
+  --primary: #a78bfa;
+  --primary-dark: #c4b5fd;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-dark: var(--primary-dark);
+  
+  --shadow-neu: 8px 8px 16px var(--neu-dark), -8px -8px 16px var(--neu-light);
+  --shadow-neu-hover: 6px 6px 12px var(--neu-dark), -6px -6px 12px var(--neu-light);
+  --shadow-neu-active: inset 4px 4px 8px var(--neu-dark), inset -4px -4px 8px var(--neu-light);
+  --shadow-neu-inset: inset 6px 6px 12px var(--neu-dark), inset -6px -6px 12px var(--neu-light);
+  --shadow-neu-sm: 4px 4px 8px var(--neu-dark), -4px -4px 8px var(--neu-light);
+  
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), sans-serif;
+  min-height: 100vh;
+}
