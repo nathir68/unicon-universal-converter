@@ -18,6 +18,8 @@ interface Job {
   progress: number;
   downloadUrl: string | null;
   error: string | null;
+  originalSize?: number;
+  convertedSize?: number;
 }
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
@@ -161,13 +163,30 @@ function JobCard({ job, onRemove, onUpdate }: {
 
       {/* Success */}
       {job.status === 'success' && job.downloadUrl && (
-        <div className="flex items-center gap-3">
-          <CheckCircle className="text-green-500 w-5 h-5 flex-shrink-0" />
-          <a
-            href={job.downloadUrl}
-            download
-            className="flex-1 h-9 flex items-center justify-center rounded-xl bg-green-500 text-white text-sm font-medium shadow-[4px_4px_10px_rgba(34,197,94,0.4)] hover:opacity-90 transition-opacity"
-          >Download</a>
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center gap-3">
+            <CheckCircle className="text-green-500 w-5 h-5 flex-shrink-0" />
+            <a
+              href={job.downloadUrl}
+              download
+              className="flex-1 h-9 flex items-center justify-center rounded-xl bg-green-500 text-white text-sm font-medium shadow-[4px_4px_10px_rgba(34,197,94,0.4)] hover:opacity-90 transition-opacity"
+            >
+              Download
+            </a>
+          </div>
+
+          {job.originalSize !== undefined && job.convertedSize !== undefined && (
+            <div className="flex items-center gap-2 text-xs text-gray-500 ml-8">
+              <span>{(job.originalSize / 1024 / 1024).toFixed(2)} MB</span>
+              <span>➔</span>
+              <span className="font-semibold text-gray-700">{(job.convertedSize / 1024 / 1024).toFixed(2)} MB</span>
+              {job.convertedSize < job.originalSize && (
+                <span className="bg-green-100 text-green-700 font-medium px-2 py-0.5 rounded-full text-[11px]">
+                  -{(((job.originalSize - job.convertedSize) / job.originalSize) * 100).toFixed(0)}%
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -252,7 +271,13 @@ export function FileUploader() {
 
         if (res.success && res.downloadUrl) {
           serverJobId = res.jobId;
-          updateJob(job.id, { status: 'success', downloadUrl: res.downloadUrl, progress: 100 });
+          updateJob(job.id, {
+            status: 'success',
+            downloadUrl: res.downloadUrl,
+            progress: 100,
+            originalSize: res.originalSize,
+            convertedSize: res.convertedSize,
+          });
         } else {
           updateJob(job.id, { status: 'error', error: res.error || 'Operation failed.' });
         }

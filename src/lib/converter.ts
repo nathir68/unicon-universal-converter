@@ -118,10 +118,17 @@ export async function convertFile(
     let format = targetFormat === 'jpg' ? 'jpeg' : targetFormat;
     let pipeline = sharp(inputPath);
     if (isCompress) {
-      if (format === 'jpeg') pipeline = pipeline.jpeg({ quality: 60 });
-      else if (format === 'png') pipeline = pipeline.png({ quality: 60, compressionLevel: 9 });
-      else if (format === 'webp') pipeline = pipeline.webp({ quality: 60 });
-      else pipeline = pipeline.toFormat(format as any);
+      if (format === 'jpeg') {
+        pipeline = pipeline.jpeg({ quality: 50, mozjpeg: true });
+      } else if (format === 'png') {
+        pipeline = pipeline.png({ quality: 60, palette: true, compressionLevel: 9 });
+      } else if (format === 'webp') {
+        pipeline = pipeline.webp({ quality: 50 });
+      } else if (format === 'avif') {
+        pipeline = pipeline.avif({ quality: 45 });
+      } else {
+        pipeline = pipeline.toFormat(format as any);
+      }
     } else {
       pipeline = pipeline.toFormat(format as any);
     }
@@ -136,7 +143,7 @@ export async function convertFile(
       let command = ffmpeg(inputPath).toFormat(targetFormat);
       if (isCompress) {
         if (videoFormats.includes(targetFormat)) {
-          command = command.videoCodec('libx264').outputOptions(['-crf 28', '-preset fast']).audioBitrate('96k');
+          command = command.videoCodec('libx264').outputOptions(['-crf 30', '-preset faster']).audioBitrate('64k');
         } else {
           command = command.audioBitrate('64k');
         }
@@ -154,13 +161,18 @@ export async function convertFile(
   // ── PDF Handling ──────────────────────────────────────────────────────────
   const isPdfInput = inputPath.toLowerCase().endsWith('.pdf') || mimeType === 'application/pdf';
   if (isPdfInput) {
-    // PDF Compression or duplicate format
-    if (isCompress || targetFormat === 'pdf') {
-      const { PDFDocument } = require('pdf-lib');
+    // PDF Compression
+    if (isCompress) {
+      const { compressPdfImages } = require('./pdfCompressor');
       const pdfBytes = await fs.promises.readFile(inputPath);
-      const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
-      const compressedBytes = await pdfDoc.save({ useObjectStreams: true });
+      const { buffer: compressedBytes } = await compressPdfImages(pdfBytes, 50);
       await fs.promises.writeFile(outputPath, compressedBytes);
+      setProgress(jobId, 100);
+      return;
+    }
+
+    if (targetFormat === 'pdf') {
+      await fs.promises.copyFile(inputPath, outputPath);
       setProgress(jobId, 100);
       return;
     }

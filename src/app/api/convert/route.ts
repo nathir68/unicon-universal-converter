@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { writeFile, mkdir } from 'fs/promises';
+import { writeFile, mkdir, stat } from 'fs/promises';
 import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { convertFile, cleanupJob, cleanupOldFiles } from '@/lib/converter';
@@ -40,10 +40,14 @@ export async function POST(request: NextRequest) {
     // Schedule cleanup of this job's files after 5 minutes
     setTimeout(() => cleanupJob(jobId, originalExt, targetFormat), 5 * 60 * 1000);
 
+    const outStat = await stat(outputPath).catch(() => null);
+
     return NextResponse.json({
       success: true,
       downloadUrl: `/api/download/${jobId}.${targetFormat}`,
       jobId,
+      originalSize: buffer.length,
+      convertedSize: outStat ? outStat.size : buffer.length,
     });
   } catch (error: any) {
     console.error('Conversion error:', error);
