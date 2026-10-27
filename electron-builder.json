@@ -1,0 +1,23 @@
+{
+  "appId": "com.nathir68.uniconvert",
+  "productName": "UniConvert",
+  "directories": {
+    "output": "dist-electron"
+  },
+  "files": [
+    "main.js",
+    ".next/standalone/**/*"
+  ],
+  "extraMetadata": {
+    "main": "main.js"
+  },
+  "win": {
+    "target": "nsis",
+    "icon": "public/logo.png"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true
+  }
+}

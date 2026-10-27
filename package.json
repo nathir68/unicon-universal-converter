@@ -2,11 +2,14 @@
   "name": "universal-converter",
   "version": "0.1.0",
   "private": true,
+  "main": "main.js",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "build:electron": "node build-electron.js && electron-builder --config electron-builder.json",
+    "start:electron": "node build-electron.js && electron ."
   },
   "dependencies": {
     "archiver": "^8.0.0",
@@ -38,6 +41,8 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/uuid": "^10.0.0",
+    "electron": "^44.4.4",
+    "electron-builder": "^26.15.3",
     "eslint": "^9",
     "eslint-config-next": "16.3.3",
     "tailwindcss": "^4",
