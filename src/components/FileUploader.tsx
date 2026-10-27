@@ -22,19 +22,48 @@ interface Job {
 
 // ─── Format helpers ───────────────────────────────────────────────────────────
 
-function getAvailableFormats(mimeType: string): string[] {
-  if (mimeType.startsWith('image/')) return ['png', 'jpg', 'webp', 'gif', 'avif', 'bmp'];
-  if (mimeType.startsWith('video/')) return ['mp4', 'mkv', 'mov', 'avi', 'webm', 'mp3'];
-  if (mimeType.startsWith('audio/')) return ['mp3', 'wav', 'aac', 'flac', 'ogg'];
-  if (mimeType === 'application/pdf') return ['txt', 'pdf'];
-  if (mimeType.includes('wordprocessingml') || mimeType.includes('msword')) return ['pdf', 'html', 'txt'];
-  if (mimeType.includes('presentationml') || mimeType.includes('powerpoint')) return ['pdf', 'pptx'];
-  if (mimeType.includes('spreadsheetml') || mimeType.includes('excel')) return ['pdf', 'xlsx', 'csv'];
-  return ['pdf', 'png', 'jpg', 'mp3', 'mp4', 'txt'];
+function getAvailableFormats(fileName: string, mimeType: string): string[] {
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+
+  if (ext === 'pdf' || mimeType === 'application/pdf') {
+    return ['txt'];
+  }
+  if (['docx', 'doc'].includes(ext) || mimeType.includes('wordprocessingml') || mimeType.includes('msword')) {
+    return ['pdf', 'html', 'txt'];
+  }
+  if (['pptx', 'ppt'].includes(ext) || mimeType.includes('presentationml')) {
+    return ['pdf'];
+  }
+  if (['xlsx', 'xls', 'csv'].includes(ext) || mimeType.includes('spreadsheetml')) {
+    return ['pdf', 'csv'];
+  }
+  if (['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'bmp'].includes(ext) || mimeType.startsWith('image/')) {
+    const all = ['png', 'jpg', 'webp', 'gif', 'avif', 'bmp'];
+    return all.filter(f => f !== ext && !(ext === 'jpeg' && f === 'jpg'));
+  }
+  if (['mp4', 'mkv', 'mov', 'avi', 'webm'].includes(ext) || mimeType.startsWith('video/')) {
+    const all = ['mp4', 'mkv', 'mov', 'avi', 'webm', 'mp3'];
+    return all.filter(f => f !== ext);
+  }
+  if (['mp3', 'wav', 'aac', 'flac', 'ogg', 'm4a'].includes(ext) || mimeType.startsWith('audio/')) {
+    const all = ['mp3', 'wav', 'aac', 'flac', 'ogg'];
+    return all.filter(f => f !== ext);
+  }
+  return ['pdf', 'txt'];
 }
 
-function canCompress(mimeType: string): boolean {
-  return mimeType.startsWith('image/') || mimeType.startsWith('video/') || mimeType.startsWith('audio/') || mimeType === 'application/pdf';
+function canCompress(fileName: string, mimeType: string): boolean {
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+  return (
+    ext === 'pdf' ||
+    mimeType === 'application/pdf' ||
+    mimeType.startsWith('image/') ||
+    ['jpg', 'jpeg', 'png', 'webp', 'avif'].includes(ext) ||
+    mimeType.startsWith('video/') ||
+    ['mp4', 'mkv', 'mov', 'avi', 'webm'].includes(ext) ||
+    mimeType.startsWith('audio/') ||
+    ['mp3', 'wav', 'aac', 'flac', 'ogg'].includes(ext)
+  );
 }
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
@@ -59,8 +88,8 @@ function JobCard({ job, onRemove, onUpdate }: {
   onRemove: (id: string) => void;
   onUpdate: (id: string, patch: Partial<Job>) => void;
 }) {
-  const formats = getAvailableFormats(job.file.type);
-  const compressable = canCompress(job.file.type);
+  const formats = getAvailableFormats(job.file.name, job.file.type);
+  const compressable = canCompress(job.file.name, job.file.type);
   const ext = job.file.name.split('.').pop() || '';
 
   return (
@@ -172,7 +201,7 @@ export function FileUploader() {
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
     const newJobs: Job[] = acceptedFiles.map(file => {
-      const formats = getAvailableFormats(file.type);
+      const formats = getAvailableFormats(file.name, file.type);
       return {
         id: uid(),
         file,

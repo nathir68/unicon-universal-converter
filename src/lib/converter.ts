@@ -17,7 +17,6 @@ function findGhostscript(): string | null {
     'C:\\Program Files\\gs\\gs10.02.1\\bin\\gswin64c.exe',
     'C:\\Program Files (x86)\\gs\\gs10.04.0\\bin\\gswin32c.exe',
   ];
-  // Also scan Program Files\gs for any version
   try {
     const gsBase = 'C:\\Program Files\\gs';
     if (fs.existsSync(gsBase)) {
@@ -152,39 +151,47 @@ export async function convertFile(
     });
   }
 
-  // ── PDF Compression via Ghostscript ──────────────────────────────────────
-  if (isCompress && mimeType === 'application/pdf' && targetFormat === 'pdf') {
-    const gs = findGhostscript();
-    if (!gs) throw new Error('Ghostscript is not installed. Please install it for PDF compression.');
-    execSync(`"${gs}" -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/ebook -dNOPAUSE -dQUIET -dBATCH -sOutputFile="${outputPath}" "${inputPath}"`);
-    setProgress(jobId, 100);
-    return;
-  }
+  // ── PDF Handling ──────────────────────────────────────────────────────────
+  const isPdfInput = inputPath.toLowerCase().endsWith('.pdf') || mimeType === 'application/pdf';
+  if (isPdfInput) {
+    // PDF Compression or duplicate format
+    if (isCompress || targetFormat === 'pdf') {
+      const { PDFDocument } = require('pdf-lib');
+      const pdfBytes = await fs.promises.readFile(inputPath);
+      const pdfDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+      const compressedBytes = await pdfDoc.save({ useObjectStreams: true });
+      await fs.promises.writeFile(outputPath, compressedBytes);
+      setProgress(jobId, 100);
+      return;
+    }
 
-  // ── PDF → TXT ─────────────────────────────────────────────────────────────
-  if (mimeType === 'application/pdf' && targetFormat === 'txt') {
-    const PDFParser = require('pdf2json');
-    return new Promise((resolve, reject) => {
-      const pdfParser = new PDFParser(null, 1);
-      pdfParser.on('pdfParser_dataError', (e: any) => reject(new Error(e.parserError)));
-      pdfParser.on('pdfParser_dataReady', async () => {
-        try {
-          const text = pdfParser.getRawTextContent();
-          await fs.promises.writeFile(outputPath, text);
-          setProgress(jobId, 100);
-          resolve();
-        } catch (err) { reject(err); }
+    // PDF to TXT
+    if (targetFormat === 'txt') {
+      const PDFParser = require('pdf2json');
+      return new Promise((resolve, reject) => {
+        const pdfParser = new PDFParser(null, 1);
+        pdfParser.on('pdfParser_dataError', (e: any) => reject(new Error(e.parserError)));
+        pdfParser.on('pdfParser_dataReady', async () => {
+          try {
+            const text = pdfParser.getRawTextContent();
+            await fs.promises.writeFile(outputPath, text);
+            setProgress(jobId, 100);
+            resolve();
+          } catch (err) { reject(err); }
+        });
+        pdfParser.loadPDF(inputPath);
       });
-      pdfParser.loadPDF(inputPath);
-    });
+    }
+
+    throw new Error(`Converting PDF directly to ${targetFormat.toUpperCase()} is not supported. You can compress PDF or convert it to TXT.`);
   }
 
-  // ── Office Docs (DOCX, PPTX, XLSX) via LibreOffice ───────────────────────
+  // ── Office Docs (DOCX, PPTX, XLSX) ─────────────────────────────────────────
   const isOfficeInput = officeFormats.some(ext => inputPath.toLowerCase().endsWith(`.${ext}`))
     || mimeType.includes('officedocument') || mimeType.includes('opendocument');
   const isDocxInput = inputPath.toLowerCase().endsWith('.docx') || mimeType.includes('wordprocessingml');
 
-  // Special DOCX fast-path using mammoth
+  // Fast-path DOCX using mammoth
   if (isDocxInput && ['txt', 'html'].includes(targetFormat)) {
     const mammoth = require('mammoth');
     if (targetFormat === 'txt') {
@@ -202,12 +209,10 @@ export async function convertFile(
     }
   }
 
-  // LibreOffice path for Office → PDF, DOCX, PPTX, XLSX, etc.
-  if (isOfficeInput || ['pdf', 'docx', 'pptx', 'xlsx', 'odt', 'txt', 'html'].includes(targetFormat)) {
+  // DOCX -> PDF via Edge fallback if LibreOffice is absent
+  if (isDocxInput && targetFormat === 'pdf') {
     const soffice = findLibreOffice();
-
-    // Fallback: puppeteer path for DOCX → PDF when LibreOffice not available
-    if (!soffice && isDocxInput && targetFormat === 'pdf') {
+    if (!soffice) {
       const mammoth = require('mammoth');
       const puppeteer = require('puppeteer-core');
       const result = await mammoth.convertToHtml({ path: inputPath });
@@ -223,12 +228,15 @@ export async function convertFile(
       setProgress(jobId, 100);
       return;
     }
+  }
 
-    if (!soffice) throw new Error('LibreOffice is not installed. Please install it to convert Office/PPTX/XLSX files.');
+  // LibreOffice path for Office inputs (DOCX, PPTX, XLSX)
+  if (isOfficeInput) {
+    const soffice = findLibreOffice();
+    if (!soffice) throw new Error('LibreOffice is required to convert Office (PPTX/XLSX/DOCX) files.');
 
-    // LibreOffice converts to a dir; we then rename the output file
     const outDir = path.dirname(outputPath);
-    const loFormat = targetFormat === 'pdf' ? 'pdf' : targetFormat === 'docx' ? 'docx' : targetFormat === 'pptx' ? 'pptx' : targetFormat === 'xlsx' ? 'xlsx' : targetFormat;
+    const loFormat = targetFormat;
 
     await new Promise<void>((resolve, reject) => {
       const proc = spawn(`"${soffice}"`, [
@@ -238,7 +246,6 @@ export async function convertFile(
       proc.on('error', reject);
     });
 
-    // LibreOffice names the output after the input file — rename to jobId
     const inputBaseName = path.basename(inputPath, path.extname(inputPath));
     const loOutput = path.join(outDir, `${inputBaseName}.${loFormat}`);
     if (loOutput !== outputPath && fs.existsSync(loOutput)) {
@@ -267,5 +274,5 @@ export async function convertFile(
     return;
   }
 
-  throw new Error(`Conversion from ${mimeType} to ${targetFormat} is not supported yet.`);
+  throw new Error(`Conversion from ${mimeType || path.extname(inputPath)} to ${targetFormat} is not supported.`);
 }
