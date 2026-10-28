@@ -6,12 +6,11 @@ import { execSync, spawn } from 'child_process';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
+let cachedGhostscript: string | null = null;
 /** Find Ghostscript executable on common Windows paths */
 function findGhostscript(): string | null {
+  if (cachedGhostscript !== null) return cachedGhostscript;
   const candidates = [
-    'gswin64c',
-    'gswin32c',
-    'gs',
     'C:\\Program Files\\gs\\gs10.04.0\\bin\\gswin64c.exe',
     'C:\\Program Files\\gs\\gs10.03.1\\bin\\gswin64c.exe',
     'C:\\Program Files\\gs\\gs10.02.1\\bin\\gswin64c.exe',
@@ -28,20 +27,29 @@ function findGhostscript(): string | null {
   } catch {}
 
   for (const c of candidates) {
-    try { execSync(`"${c}" --version`, { stdio: 'ignore' }); return c; } catch {}
+    if (fs.existsSync(c)) {
+      cachedGhostscript = c;
+      return c;
+    }
   }
   return null;
 }
 
-/** Find LibreOffice soffice executable */
+let cachedSoffice: string | null = null;
+/** Find LibreOffice soffice executable (prefers soffice.com for headless CLI without window popups) */
 function findLibreOffice(): string | null {
+  if (cachedSoffice !== null) return cachedSoffice;
   const candidates = [
-    'soffice',
+    'C:\\Program Files\\LibreOffice\\program\\soffice.com',
+    'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.com',
     'C:\\Program Files\\LibreOffice\\program\\soffice.exe',
     'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
   ];
   for (const c of candidates) {
-    try { execSync(`"${c}" --version`, { stdio: 'ignore' }); return c; } catch {}
+    if (fs.existsSync(c)) {
+      cachedSoffice = c;
+      return c;
+    }
   }
   return null;
 }
@@ -361,9 +369,15 @@ export async function convertFile(
     const loFormat = targetFormat;
 
     await new Promise<void>((resolve, reject) => {
-      const proc = spawn(`"${soffice}"`, [
-        '--headless', '--convert-to', loFormat, '--outdir', outDir, inputPath
-      ], { shell: true });
+      const proc = spawn(soffice, [
+        '--headless',
+        '--convert-to', loFormat,
+        '--outdir', outDir,
+        inputPath
+      ], {
+        windowsHide: true,
+        shell: false
+      });
       proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`LibreOffice exited with code ${code}`)));
       proc.on('error', reject);
     });
