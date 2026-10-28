@@ -46,6 +46,52 @@ function findLibreOffice(): string | null {
   return null;
 }
 
+/** Extract structured text lines grouped by page and vertical position from PDF */
+async function extractPdfData(inputPath: string): Promise<string[][]> {
+  const PDFParser = require('pdf2json');
+  return new Promise((resolve, reject) => {
+    const pdfParser = new PDFParser(null, 1);
+    pdfParser.on('pdfParser_dataError', (e: any) => reject(new Error(e.parserError || 'Failed to parse PDF')));
+    pdfParser.on('pdfParser_dataReady', (pdfData: any) => {
+      try {
+        const pages: string[][] = [];
+        if (pdfData && pdfData.Pages) {
+          for (const page of pdfData.Pages) {
+            const pageLines: string[] = [];
+            const lineMap = new Map<number, string[]>();
+            if (page.Texts) {
+              for (const textItem of page.Texts) {
+                const y = Math.round(textItem.y * 10) / 10;
+                let textStr = '';
+                if (textItem.R) {
+                  for (const r of textItem.R) {
+                    try {
+                      textStr += decodeURIComponent(r.T);
+                    } catch {
+                      textStr += r.T;
+                    }
+                  }
+                }
+                if (!lineMap.has(y)) lineMap.set(y, []);
+                lineMap.get(y)!.push(textStr);
+              }
+              const sortedY = Array.from(lineMap.keys()).sort((a, b) => a - b);
+              for (const y of sortedY) {
+                pageLines.push(lineMap.get(y)!.join(' ').trim());
+              }
+            }
+            pages.push(pageLines);
+          }
+        }
+        resolve(pages);
+      } catch (err) {
+        reject(err);
+      }
+    });
+    pdfParser.loadPDF(inputPath);
+  });
+}
+
 // ─── Progress Tracking ───────────────────────────────────────────────────────
 
 const progressMap = new Map<string, number>();
@@ -104,6 +150,7 @@ export async function convertFile(
   jobId: string = 'default'
 ): Promise<void> {
   targetFormat = targetFormat.toLowerCase();
+  const inputExt = (inputPath.split('.').pop() || '').toLowerCase();
 
   const imageFormats = ['jpg', 'jpeg', 'png', 'webp', 'avif', 'tiff', 'gif', 'bmp', 'ico'];
   const videoFormats = ['mp4', 'avi', 'mkv', 'mov', 'webm', 'flv'];
@@ -113,7 +160,37 @@ export async function convertFile(
 
   setProgress(jobId, 5);
 
-  // ── Image ────────────────────────────────────────────────────────────────
+  // ── Image to PDF ─────────────────────────────────────────────────────────
+  const isImageInput = imageFormats.includes(inputExt) || mimeType.startsWith('image/');
+  if (isImageInput && targetFormat === 'pdf') {
+    const { PDFDocument } = require('pdf-lib');
+    const pdfDoc = await PDFDocument.create();
+    const imgBuffer = await fs.promises.readFile(inputPath);
+    let image;
+    if (inputPath.toLowerCase().endsWith('.png')) {
+      try {
+        image = await pdfDoc.embedPng(imgBuffer);
+      } catch {
+        const jpgBuf = await sharp(imgBuffer).jpeg().toBuffer();
+        image = await pdfDoc.embedJpg(jpgBuf);
+      }
+    } else {
+      try {
+        image = await pdfDoc.embedJpg(imgBuffer);
+      } catch {
+        const jpgBuf = await sharp(imgBuffer).jpeg().toBuffer();
+        image = await pdfDoc.embedJpg(jpgBuf);
+      }
+    }
+    const page = pdfDoc.addPage([image.width, image.height]);
+    page.drawImage(image, { x: 0, y: 0, width: image.width, height: image.height });
+    const pdfBytes = await pdfDoc.save();
+    await fs.promises.writeFile(outputPath, pdfBytes);
+    setProgress(jobId, 100);
+    return;
+  }
+
+  // ── Image to Image (with compression) ────────────────────────────────────
   if (imageFormats.includes(targetFormat)) {
     let format = targetFormat === 'jpg' ? 'jpeg' : targetFormat;
     let pipeline = sharp(inputPath);
@@ -158,7 +235,7 @@ export async function convertFile(
     });
   }
 
-  // ── PDF Handling ──────────────────────────────────────────────────────────
+  // ── PDF Handling (DOCX, TXT, HTML, Compression) ───────────────────────────
   const isPdfInput = inputPath.toLowerCase().endsWith('.pdf') || mimeType === 'application/pdf';
   if (isPdfInput) {
     // PDF Compression
@@ -177,25 +254,58 @@ export async function convertFile(
       return;
     }
 
-    // PDF to TXT
-    if (targetFormat === 'txt') {
-      const PDFParser = require('pdf2json');
-      return new Promise((resolve, reject) => {
-        const pdfParser = new PDFParser(null, 1);
-        pdfParser.on('pdfParser_dataError', (e: any) => reject(new Error(e.parserError)));
-        pdfParser.on('pdfParser_dataReady', async () => {
-          try {
-            const text = pdfParser.getRawTextContent();
-            await fs.promises.writeFile(outputPath, text);
-            setProgress(jobId, 100);
-            resolve();
-          } catch (err) { reject(err); }
-        });
-        pdfParser.loadPDF(inputPath);
+    // PDF to DOCX (Word Document)
+    if (targetFormat === 'docx' || targetFormat === 'doc') {
+      const { Document, Packer, Paragraph, TextRun } = require('docx');
+      const pages = await extractPdfData(inputPath);
+      const docChildren: any[] = [];
+      for (const lines of pages) {
+        for (const line of lines) {
+          if (line.trim()) {
+            docChildren.push(new Paragraph({
+              children: [new TextRun({ text: line, size: 24 })],
+              spacing: { after: 120 }
+            }));
+          }
+        }
+      }
+      const doc = new Document({
+        sections: [{
+          properties: {},
+          children: docChildren.length > 0 ? docChildren : [new Paragraph({ children: [new TextRun('Empty Document')] })]
+        }]
       });
+      const docxBuffer = await Packer.toBuffer(doc);
+      await fs.promises.writeFile(outputPath, docxBuffer);
+      setProgress(jobId, 100);
+      return;
     }
 
-    throw new Error(`Converting PDF directly to ${targetFormat.toUpperCase()} is not supported. You can compress PDF or convert it to TXT.`);
+    // PDF to TXT
+    if (targetFormat === 'txt') {
+      const pages = await extractPdfData(inputPath);
+      const fullText = pages.map(lines => lines.join('\r\n')).join('\r\n\r\n--- Page Break ---\r\n\r\n');
+      await fs.promises.writeFile(outputPath, fullText || 'No text extracted.', 'utf8');
+      setProgress(jobId, 100);
+      return;
+    }
+
+    // PDF to HTML
+    if (targetFormat === 'html') {
+      const pages = await extractPdfData(inputPath);
+      const htmlBody = pages.map((lines, i) => `
+        <div class="page" style="margin-bottom: 2rem; padding: 2rem; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.1); border-radius: 8px;">
+          <div style="font-size: 0.8rem; color: #888; margin-bottom: 1rem;">Page ${i + 1}</div>
+          ${lines.map(l => `<p style="margin: 0.5rem 0; line-height: 1.6;">${l.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`).join('')}
+        </div>
+      `).join('');
+      const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Converted Document</title><style>body{font-family:system-ui,sans-serif;background:#f3f4f6;padding:2rem;max-width:800px;margin:auto;}</style></head><body>${htmlBody}</body></html>`;
+      await fs.promises.writeFile(outputPath, fullHtml, 'utf8');
+      setProgress(jobId, 100);
+      return;
+    }
+
+    throw new Error(`Converting PDF to ${targetFormat.toUpperCase()} is not supported. Supported: DOCX, TXT, HTML.`);
   }
 
   // ── Office Docs (DOCX, PPTX, XLSX) ─────────────────────────────────────────

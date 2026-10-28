@@ -28,7 +28,7 @@ function getAvailableFormats(fileName: string, mimeType: string): string[] {
   const ext = fileName.split('.').pop()?.toLowerCase() || '';
 
   if (ext === 'pdf' || mimeType === 'application/pdf') {
-    return ['txt'];
+    return ['docx', 'txt', 'html'];
   }
   if (['docx', 'doc'].includes(ext) || mimeType.includes('wordprocessingml') || mimeType.includes('msword')) {
     return ['pdf', 'html', 'txt'];
@@ -40,7 +40,7 @@ function getAvailableFormats(fileName: string, mimeType: string): string[] {
     return ['pdf', 'csv'];
   }
   if (['jpg', 'jpeg', 'png', 'webp', 'gif', 'avif', 'bmp'].includes(ext) || mimeType.startsWith('image/')) {
-    const all = ['png', 'jpg', 'webp', 'gif', 'avif', 'bmp'];
+    const all = ['png', 'jpg', 'webp', 'pdf', 'gif', 'avif', 'bmp'];
     return all.filter(f => f !== ext && !(ext === 'jpeg' && f === 'jpg'));
   }
   if (['mp4', 'mkv', 'mov', 'avi', 'webm'].includes(ext) || mimeType.startsWith('video/')) {
