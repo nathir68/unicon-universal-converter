@@ -54,6 +54,62 @@ function findLibreOffice(): string | null {
   return null;
 }
 
+/** Convert PDF to DOCX using pdf2docx (Python) with high visual fidelity */
+async function convertPdfToDocxPython(inputPath: string, outputPath: string): Promise<boolean> {
+  const scriptPath = path.join(__dirname, 'pdf_to_docx.py');
+  const pyCandidates = ['python', 'py'];
+  
+  for (const py of pyCandidates) {
+    try {
+      const success = await new Promise<boolean>((resolve) => {
+        const proc = spawn(py, [scriptPath, inputPath, outputPath], {
+          windowsHide: true,
+          shell: false,
+        });
+        proc.on('close', (code) => {
+          resolve(code === 0 && fs.existsSync(outputPath));
+        });
+        proc.on('error', () => resolve(false));
+      });
+      if (success) return true;
+    } catch {}
+  }
+  return false;
+}
+
+/** Convert PDF to DOCX using LibreOffice as a fallback */
+async function convertPdfToDocxLibreOffice(inputPath: string, outputPath: string): Promise<boolean> {
+  const soffice = findLibreOffice();
+  if (!soffice) return false;
+
+  const outDir = path.dirname(outputPath);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const proc = spawn(soffice, [
+        '--headless',
+        '--infilter=writer_pdf_import',
+        '--convert-to', 'docx',
+        '--outdir', outDir,
+        inputPath
+      ], {
+        windowsHide: true,
+        shell: false
+      });
+      proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`LibreOffice exited with code ${code}`)));
+      proc.on('error', reject);
+    });
+
+    const inputBaseName = path.basename(inputPath, path.extname(inputPath));
+    const loOutput = path.join(outDir, `${inputBaseName}.docx`);
+    if (loOutput !== outputPath && fs.existsSync(loOutput)) {
+      await fs.promises.rename(loOutput, outputPath);
+    }
+    return fs.existsSync(outputPath);
+  } catch {
+    return false;
+  }
+}
+
 /** Extract structured text lines grouped by page and vertical position from PDF */
 async function extractPdfData(inputPath: string): Promise<string[][]> {
   const PDFParser = require('pdf2json');
@@ -262,29 +318,45 @@ export async function convertFile(
       return;
     }
 
-    // PDF to DOCX (Word Document)
+    // PDF to DOCX (Word Document) - High Fidelity Conversion
     if (targetFormat === 'docx' || targetFormat === 'doc') {
-      const { Document, Packer, Paragraph, TextRun } = require('docx');
-      const pages = await extractPdfData(inputPath);
-      const docChildren: any[] = [];
-      for (const lines of pages) {
-        for (const line of lines) {
-          if (line.trim()) {
-            docChildren.push(new Paragraph({
-              children: [new TextRun({ text: line, size: 24 })],
-              spacing: { after: 120 }
-            }));
+      setProgress(jobId, 20);
+
+      // Tier 1: Specialized pdf2docx (reconstructs full document layout, tables, fonts, formatting, shapes, and images)
+      let converted = await convertPdfToDocxPython(inputPath, outputPath);
+
+      // Tier 2: LibreOffice Writer PDF Import filter
+      if (!converted) {
+        setProgress(jobId, 50);
+        converted = await convertPdfToDocxLibreOffice(inputPath, outputPath);
+      }
+
+      // Tier 3: Structured docx text fallback
+      if (!converted) {
+        setProgress(jobId, 80);
+        const { Document, Packer, Paragraph, TextRun } = require('docx');
+        const pages = await extractPdfData(inputPath);
+        const docChildren: any[] = [];
+        for (const lines of pages) {
+          for (const line of lines) {
+            if (line.trim()) {
+              docChildren.push(new Paragraph({
+                children: [new TextRun({ text: line, size: 24 })],
+                spacing: { after: 120 }
+              }));
+            }
           }
         }
+        const doc = new Document({
+          sections: [{
+            properties: {},
+            children: docChildren.length > 0 ? docChildren : [new Paragraph({ children: [new TextRun('Empty Document')] })]
+          }]
+        });
+        const docxBuffer = await Packer.toBuffer(doc);
+        await fs.promises.writeFile(outputPath, docxBuffer);
       }
-      const doc = new Document({
-        sections: [{
-          properties: {},
-          children: docChildren.length > 0 ? docChildren : [new Paragraph({ children: [new TextRun('Empty Document')] })]
-        }]
-      });
-      const docxBuffer = await Packer.toBuffer(doc);
-      await fs.promises.writeFile(outputPath, docxBuffer);
+
       setProgress(jobId, 100);
       return;
     }
