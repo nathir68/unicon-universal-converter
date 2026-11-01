@@ -20,19 +20,19 @@ export function Header() {
       <div className="w-full max-w-7xl mx-auto h-16 sm:h-20 flex items-center justify-between px-4 sm:px-6 md:px-12">
         
         {/* Brand / Logo */}
-        <Link href="/" className="flex items-center gap-2.5 sm:gap-3 group focus:outline-none" onClick={closeMenu}>
-          <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-background shadow-[var(--shadow-neu-sm)] group-hover:shadow-[var(--shadow-neu)] flex items-center justify-center overflow-hidden border border-white/20 transition-all flex-shrink-0 p-1">
+        <Link href="/" className="flex items-center gap-3 sm:gap-3.5 group focus:outline-none" onClick={closeMenu}>
+          <div className="w-12 h-12 sm:w-14 sm:h-14 rounded-2xl bg-white/60 dark:bg-dark-card/60 shadow-[var(--shadow-neu-sm)] group-hover:shadow-[var(--shadow-neu)] flex items-center justify-center overflow-hidden border border-white/40 dark:border-white/10 transition-all flex-shrink-0 p-1 group-hover:scale-105">
             <img 
               src="/logo.png" 
               alt="UniCon Logo" 
-              className="w-full h-full object-contain" 
+              className="w-full h-full object-contain filter drop-shadow-sm" 
             />
           </div>
           <div className="flex flex-col">
-            <span className="text-lg sm:text-xl font-bold text-gray-800 dark:text-gray-100 tracking-tight leading-tight">
+            <span className="text-xl sm:text-2xl font-black text-gray-900 dark:text-gray-50 tracking-tight leading-none">
               UniCon
             </span>
-            <span className="hidden xs:inline text-[10px] text-gray-500 dark:text-gray-400 font-medium tracking-tight -mt-0.5">
+            <span className="hidden xs:inline text-[11px] sm:text-xs text-gray-500 dark:text-gray-400 font-semibold tracking-wide mt-1">
               Universal Converter
             </span>
           </div>

@@ -6,11 +6,11 @@ export default function About() {
     <div className="min-h-screen flex flex-col overflow-x-hidden">
       <Header />
       <main className="flex-1 flex flex-col items-center w-full max-w-4xl mx-auto px-4 sm:px-6 py-8 sm:py-12 text-center">
-        <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-2xl bg-background shadow-[var(--shadow-neu)] p-2.5 mb-6 flex items-center justify-center border border-white/20">
+        <div className="w-24 h-24 sm:w-32 sm:h-32 rounded-3xl bg-white/70 dark:bg-dark-card/70 shadow-[var(--shadow-neu)] p-3 sm:p-4 mb-6 flex items-center justify-center border border-white/40 dark:border-white/10 hover:scale-105 transition-all duration-300">
           <img 
             src="/logo.png" 
             alt="UniCon Logo" 
-            className="w-full h-full object-contain" 
+            className="w-full h-full object-contain filter drop-shadow-md" 
           />
         </div>
         <h1 className="text-2xl sm:text-4xl font-extrabold text-gray-800 dark:text-gray-100 mb-4 sm:mb-6">
