@@ -15,9 +15,11 @@ export function Header() {
     <header className="w-full h-20 grid grid-cols-3 items-center px-6 md:px-12 bg-background sticky top-0 z-50">
       <div className="flex items-center gap-3 justify-self-start">
         <div className="w-10 h-10 rounded-xl bg-background shadow-[var(--shadow-neu)] flex items-center justify-center overflow-hidden border border-white/20">
-          <img src="/logo.jpg" alt="UniConvert Logo" className="w-full h-full object-cover mix-blend-multiply dark:mix-blend-normal" />
+          <img src="/logo.jpg" alt="UniCon - Universal Converter Logo" className="w-full h-full object-cover mix-blend-multiply dark:mix-blend-normal" />
         </div>
-        <span className="text-xl font-bold text-gray-700 tracking-wide dark:text-gray-200">UniConvert</span>
+        <span className="text-xl font-bold text-gray-700 tracking-wide dark:text-gray-200">
+          UniCon<span className="hidden sm:inline font-normal text-sm text-gray-500 dark:text-gray-400 ml-1.5">- Universal Converter</span>
+        </span>
       </div>
       
       <nav className="hidden md:flex items-center gap-8 text-gray-600 dark:text-gray-400 font-medium justify-self-center">

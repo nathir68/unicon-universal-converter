@@ -6,9 +6,9 @@ export default function About() {
     <div className="min-h-screen flex flex-col">
       <Header />
       <main className="flex-1 flex flex-col items-center w-full max-w-4xl mx-auto px-4 py-12 text-center">
-        <h1 className="text-4xl font-bold text-gray-800 mb-6">About UniConvert</h1>
+        <h1 className="text-4xl font-bold text-gray-800 mb-6">About UniCon - Universal Converter</h1>
         <p className="text-xl text-gray-600 leading-relaxed mb-8">
-          Universal File Converter is a modern, privacy-first file conversion utility.
+          UniCon (Universal Converter) is a modern, privacy-first file conversion utility.
           We support images, audio, video, and documents. All conversions are performed
           securely and files are deleted shortly after processing.
         </p>

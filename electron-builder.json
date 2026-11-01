@@ -1,6 +1,6 @@
 {
-  "appId": "com.nathir68.uniconvert",
-  "productName": "UniConvert",
+  "appId": "com.nathir68.unicon",
+  "productName": "UniCon - Universal Converter",
   "directories": {
     "output": "dist-electron"
   },

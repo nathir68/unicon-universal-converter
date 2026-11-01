@@ -43,7 +43,7 @@ async function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1200,
     height: 800,
-    title: "UniConvert",
+    title: "UniCon - Universal Converter",
     icon: path.join(__dirname, 'public', 'logo.jpg'),
     autoHideMenuBar: true,
     webPreferences: {
