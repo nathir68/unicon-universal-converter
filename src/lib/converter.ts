@@ -3,6 +3,10 @@ import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import path from 'path';
 import { execSync, spawn } from 'child_process';
+import { compressPdfImages } from './pdfCompressor';
+import { getProgress, setProgress, clearProgress } from './progress';
+
+export { getProgress, setProgress, clearProgress };
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -27,7 +31,7 @@ function findGhostscript(): string | null {
   } catch {}
 
   for (const c of candidates) {
-    if (fs.existsSync(c)) {
+    if (fs.existsSync(/*turbopackIgnore: true*/ c)) {
       cachedGhostscript = c;
       return c;
     }
@@ -46,7 +50,7 @@ function findLibreOffice(): string | null {
     'C:\\Program Files (x86)\\LibreOffice\\program\\soffice.exe',
   ];
   for (const c of candidates) {
-    if (fs.existsSync(c)) {
+    if (fs.existsSync(/*turbopackIgnore: true*/ c)) {
       cachedSoffice = c;
       return c;
     }
@@ -62,12 +66,12 @@ async function convertPdfToDocxPython(inputPath: string, outputPath: string): Pr
   for (const py of pyCandidates) {
     try {
       const success = await new Promise<boolean>((resolve) => {
-        const proc = spawn(py, [scriptPath, inputPath, outputPath], {
+        const proc = spawn(/*turbopackIgnore: true*/ py, [scriptPath, inputPath, outputPath], {
           windowsHide: true,
           shell: false,
         });
         proc.on('close', (code) => {
-          resolve(code === 0 && fs.existsSync(outputPath));
+          resolve(code === 0 && fs.existsSync(/*turbopackIgnore: true*/ outputPath));
         });
         proc.on('error', () => resolve(false));
       });
@@ -85,7 +89,7 @@ async function convertPdfToDocxLibreOffice(inputPath: string, outputPath: string
   const outDir = path.dirname(outputPath);
   try {
     await new Promise<void>((resolve, reject) => {
-      const proc = spawn(soffice, [
+      const proc = spawn(/*turbopackIgnore: true*/ soffice, [
         '--headless',
         '--infilter=writer_pdf_import',
         '--convert-to', 'docx',
@@ -156,21 +160,7 @@ async function extractPdfData(inputPath: string): Promise<string[][]> {
   });
 }
 
-// ─── Progress Tracking ───────────────────────────────────────────────────────
-
-const progressMap = new Map<string, number>();
-
-export function getProgress(jobId: string): number {
-  return progressMap.get(jobId) ?? 0;
-}
-
-export function setProgress(jobId: string, pct: number) {
-  progressMap.set(jobId, pct);
-}
-
-export function clearProgress(jobId: string) {
-  progressMap.delete(jobId);
-}
+// ─── Progress Tracking & Cleanup ──────────────────────────────────────────
 
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
 
@@ -304,7 +294,6 @@ export async function convertFile(
   if (isPdfInput) {
     // PDF Compression
     if (isCompress) {
-      const { compressPdfImages } = require('./pdfCompressor');
       const pdfBytes = await fs.promises.readFile(inputPath);
       const { buffer: compressedBytes } = await compressPdfImages(pdfBytes, 50);
       await fs.promises.writeFile(outputPath, compressedBytes);
@@ -415,8 +404,8 @@ export async function convertFile(
   if (isDocxInput && targetFormat === 'pdf') {
     const soffice = findLibreOffice();
     if (!soffice) {
-      const mammoth = require('mammoth');
-      const puppeteer = require('puppeteer-core');
+      const mammoth = await import('mammoth');
+      const puppeteer = await import('puppeteer-core');
       const result = await mammoth.convertToHtml({ path: inputPath });
       const html = `<html><head><style>body{font-family:sans-serif;padding:2rem;}</style></head><body>${result.value}</body></html>`;
       const browser = await puppeteer.launch({
@@ -424,7 +413,7 @@ export async function convertFile(
         headless: true
       });
       const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: 'networkidle0' });
+      await page.setContent(html, { waitUntil: 'domcontentloaded' });
       await page.pdf({ path: outputPath, format: 'A4', margin: { top: '20px', right: '20px', bottom: '20px', left: '20px' } });
       await browser.close();
       setProgress(jobId, 100);
@@ -441,7 +430,7 @@ export async function convertFile(
     const loFormat = targetFormat;
 
     await new Promise<void>((resolve, reject) => {
-      const proc = spawn(soffice, [
+      const proc = spawn(/*turbopackIgnore: true*/ soffice, [
         '--headless',
         '--convert-to', loFormat,
         '--outdir', outDir,
@@ -455,8 +444,8 @@ export async function convertFile(
     });
 
     const inputBaseName = path.basename(inputPath, path.extname(inputPath));
-    const loOutput = path.join(outDir, `${inputBaseName}.${loFormat}`);
-    if (loOutput !== outputPath && fs.existsSync(loOutput)) {
+    const loOutput = path.join(/*turbopackIgnore: true*/ outDir, `${inputBaseName}.${loFormat}`);
+    if (loOutput !== outputPath && fs.existsSync(/*turbopackIgnore: true*/ loOutput)) {
       await fs.promises.rename(loOutput, outputPath);
     }
     setProgress(jobId, 100);
@@ -465,7 +454,7 @@ export async function convertFile(
 
   // ── TXT / HTML → PDF via puppeteer ───────────────────────────────────────
   if ((mimeType.includes('text/plain') || mimeType.includes('text/html')) && targetFormat === 'pdf') {
-    const puppeteer = require('puppeteer-core');
+    const puppeteer = await import('puppeteer-core');
     let content = await fs.promises.readFile(inputPath, 'utf8');
     if (mimeType.includes('text/plain')) {
       content = `<html><head><style>body{font-family:monospace;white-space:pre-wrap;padding:2rem;}</style></head><body>${content.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</body></html>`;
@@ -475,7 +464,7 @@ export async function convertFile(
       headless: true
     });
     const page = await browser.newPage();
-    await page.setContent(content, { waitUntil: 'networkidle0' });
+    await page.setContent(content, { waitUntil: 'domcontentloaded' });
     await page.pdf({ path: outputPath, format: 'A4', margin: { top: '20px', right: '20px', bottom: '20px', left: '20px' } });
     await browser.close();
     setProgress(jobId, 100);

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getProgress } from '@/lib/converter';
+import { getProgress } from '@/lib/progress';
 
 export async function GET(request: NextRequest) {
   const jobId = request.nextUrl.searchParams.get('jobId');
