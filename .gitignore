@@ -19,6 +19,10 @@
 
 # production
 /build
+/dist
+/dist-electron
+/.tmp
+*.exe
 
 # misc
 .DS_Store
