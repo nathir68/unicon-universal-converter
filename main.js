@@ -44,7 +44,7 @@ async function createWindow() {
     width: 1200,
     height: 800,
     title: "UniCon - Universal Converter",
-    icon: path.join(__dirname, 'public', 'logo.jpg'),
+    icon: path.join(__dirname, 'public', 'logo.png'),
     autoHideMenuBar: true,
     webPreferences: {
       nodeIntegration: false,

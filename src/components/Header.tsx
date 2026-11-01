@@ -21,11 +21,11 @@ export function Header() {
         
         {/* Brand / Logo */}
         <Link href="/" className="flex items-center gap-2.5 sm:gap-3 group focus:outline-none" onClick={closeMenu}>
-          <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-background shadow-[var(--shadow-neu-sm)] group-hover:shadow-[var(--shadow-neu)] flex items-center justify-center overflow-hidden border border-white/20 transition-all flex-shrink-0">
+          <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-background shadow-[var(--shadow-neu-sm)] group-hover:shadow-[var(--shadow-neu)] flex items-center justify-center overflow-hidden border border-white/20 transition-all flex-shrink-0 p-1">
             <img 
-              src="/logo.jpg" 
+              src="/logo.png" 
               alt="UniCon Logo" 
-              className="w-full h-full object-cover mix-blend-multiply dark:mix-blend-normal" 
+              className="w-full h-full object-contain" 
             />
           </div>
           <div className="flex flex-col">

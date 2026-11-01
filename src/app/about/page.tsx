@@ -6,6 +6,13 @@ export default function About() {
     <div className="min-h-screen flex flex-col overflow-x-hidden">
       <Header />
       <main className="flex-1 flex flex-col items-center w-full max-w-4xl mx-auto px-4 sm:px-6 py-8 sm:py-12 text-center">
+        <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-2xl bg-background shadow-[var(--shadow-neu)] p-2.5 mb-6 flex items-center justify-center border border-white/20">
+          <img 
+            src="/logo.png" 
+            alt="UniCon Logo" 
+            className="w-full h-full object-contain" 
+          />
+        </div>
         <h1 className="text-2xl sm:text-4xl font-extrabold text-gray-800 dark:text-gray-100 mb-4 sm:mb-6">
           About UniCon
         </h1>

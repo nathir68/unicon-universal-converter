@@ -15,6 +15,15 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "UniCon - Universal Converter",
   description: "Fast, privacy-first universal file conversion and compression tool.",
+  icons: {
+    icon: [
+      { url: '/favicon.ico' },
+      { url: '/logo.png', type: 'image/png' },
+    ],
+    apple: [
+      { url: '/apple-icon.png' },
+    ],
+  },
 };
 
 import { ThemeProvider } from "next-themes";
