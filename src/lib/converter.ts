@@ -3,8 +3,17 @@ import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import path from 'path';
 import { execSync, spawn } from 'child_process';
+import { Document, Packer, Paragraph, TextRun } from 'docx';
 import { compressPdfImages } from './pdfCompressor';
 import { getProgress, setProgress, clearProgress } from './progress';
+import { getUploadsDir, getConvertedDir } from './tempStorage';
+
+try {
+  const ffmpegStatic = require('ffmpeg-static');
+  if (ffmpegStatic) {
+    ffmpeg.setFfmpegPath(ffmpegStatic);
+  }
+} catch {}
 
 export { getProgress, setProgress, clearProgress };
 
@@ -165,22 +174,20 @@ async function extractPdfData(inputPath: string): Promise<string[][]> {
 // ─── Cleanup ─────────────────────────────────────────────────────────────────
 
 export async function cleanupJob(jobId: string, originalExt: string, targetFormat: string) {
-  const tmpDir = path.join(process.cwd(), '.tmp');
-  const inputPath = path.join(tmpDir, 'uploads', `${jobId}.${originalExt}`);
-  const outputPath = path.join(tmpDir, 'converted', `${jobId}.${targetFormat}`);
-  try { await fs.promises.unlink(inputPath); } catch {}
-  try { await fs.promises.unlink(outputPath); } catch {}
+  const inputPath = path.join(/*turbopackIgnore: true*/ getUploadsDir(), `${jobId}.${originalExt}`);
+  const outputPath = path.join(/*turbopackIgnore: true*/ getConvertedDir(), `${jobId}.${targetFormat}`);
+  try { if (fs.existsSync(/*turbopackIgnore: true*/ inputPath)) await fs.promises.unlink(inputPath); } catch {}
+  try { if (fs.existsSync(/*turbopackIgnore: true*/ outputPath)) await fs.promises.unlink(outputPath); } catch {}
   clearProgress(jobId);
 }
 
 // Auto-cleanup old temp files (older than 10 minutes)
 export async function cleanupOldFiles() {
-  const tmpDir = path.join(process.cwd(), '.tmp');
-  const dirs = ['uploads', 'converted'];
+  const dirs = [getUploadsDir(), getConvertedDir()];
   const tenMin = 10 * 60 * 1000;
-  for (const dir of dirs) {
-    const fullDir = path.join(tmpDir, dir);
+  for (const fullDir of dirs) {
     try {
+      if (!fs.existsSync(fullDir)) continue;
       const files = await fs.promises.readdir(fullDir);
       for (const file of files) {
         const filePath = path.join(fullDir, file);
@@ -320,26 +327,47 @@ export async function convertFile(
         converted = await convertPdfToDocxLibreOffice(inputPath, outputPath);
       }
 
-      // Tier 3: Structured docx text fallback
+      // Tier 3: Structured docx text fallback (works everywhere, pure Node.js in Serverless)
       if (!converted) {
         setProgress(jobId, 80);
-        const { Document, Packer, Paragraph, TextRun } = require('docx');
-        const pages = await extractPdfData(inputPath);
+        let pages: string[][] = [];
+        try {
+          pages = await extractPdfData(inputPath);
+        } catch {
+          pages = [];
+        }
+
         const docChildren: any[] = [];
-        for (const lines of pages) {
-          for (const line of lines) {
-            if (line.trim()) {
+        if (pages.length > 0) {
+          for (let p = 0; p < pages.length; p++) {
+            const lines = pages[p];
+            if (p > 0) {
               docChildren.push(new Paragraph({
-                children: [new TextRun({ text: line, size: 24 })],
-                spacing: { after: 120 }
+                children: [new TextRun({ text: '', break: 1 })],
+                pageBreakBefore: true
               }));
+            }
+            for (const line of lines) {
+              if (line.trim()) {
+                docChildren.push(new Paragraph({
+                  children: [new TextRun({ text: line, size: 24 })],
+                  spacing: { after: 120 }
+                }));
+              }
             }
           }
         }
+
+        if (docChildren.length === 0) {
+          docChildren.push(new Paragraph({
+            children: [new TextRun({ text: 'Converted Document (No selectable text found in PDF)', size: 24 })]
+          }));
+        }
+
         const doc = new Document({
           sections: [{
             properties: {},
-            children: docChildren.length > 0 ? docChildren : [new Paragraph({ children: [new TextRun('Empty Document')] })]
+            children: docChildren
           }]
         });
         const docxBuffer = await Packer.toBuffer(doc);

@@ -195,7 +195,7 @@ function JobCard({ job, onRemove, onUpdate }: {
             <CheckCircle className="text-green-500 w-5 h-5 flex-shrink-0" />
             <a
               href={job.downloadUrl}
-              download
+              download={`converted-${job.file.name.replace(/\.[^/.]+$/, "")}.${job.targetFormat || 'bin'}`}
               className="flex-1 h-10 sm:h-9 flex items-center justify-center rounded-xl bg-green-500 hover:bg-green-600 text-white text-xs sm:text-sm font-semibold shadow-[var(--shadow-neu-sm)] active:shadow-[var(--shadow-neu-active)] transition-all"
             >
               Download Converted File
@@ -292,10 +292,10 @@ export function FileUploader() {
         const resPromise = fetch('/api/convert', { method: 'POST', body: formData }).then(r => r.json());
         const res = await resPromise;
 
-        if (res.success && res.downloadUrl) {
+        if (res.success && (res.downloadDataUrl || res.downloadUrl)) {
           updateJob(job.id, {
             status: 'success',
-            downloadUrl: res.downloadUrl,
+            downloadUrl: res.downloadDataUrl || res.downloadUrl,
             progress: 100,
             originalSize: res.originalSize,
             convertedSize: res.convertedSize,
