@@ -3,8 +3,9 @@ import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import path from 'path';
 import { execSync, spawn } from 'child_process';
-import { Document, Packer, Paragraph, TextRun } from 'docx';
-import { PDFDocument, StandardFonts, rgb, PageSizes } from 'pdf-lib';
+import { Document, Packer, Paragraph, TextRun, ImageRun, HeadingLevel, AlignmentType } from 'docx';
+import { PDFDocument, PDFName, PDFRawStream, StandardFonts, rgb, PageSizes } from 'pdf-lib';
+import zlib from 'zlib';
 import { compressPdfImages } from './pdfCompressor';
 import { getProgress, setProgress, clearProgress } from './progress';
 import { getUploadsDir, getConvertedDir } from './tempStorage';
@@ -105,13 +106,13 @@ function findLibreOffice(): string | null {
 
 /** Convert PDF to DOCX using pdf2docx (Python) with high visual fidelity */
 async function convertPdfToDocxPython(inputPath: string, outputPath: string): Promise<boolean> {
-  const scriptPath = path.join(__dirname, 'pdf_to_docx.py');
-  const pyCandidates = ['python', 'py'];
+  const pyCode = 'import sys; from pdf2docx import Converter; cv = Converter(sys.argv[1]); cv.convert(sys.argv[2]); cv.close()';
+  const pyCandidates = ['python', 'py', 'python3'];
   
   for (const py of pyCandidates) {
     try {
       const success = await new Promise<boolean>((resolve) => {
-        const proc = spawn(/*turbopackIgnore: true*/ py, [scriptPath, inputPath, outputPath], {
+        const proc = spawn(/*turbopackIgnore: true*/ py, ['-c', pyCode, inputPath, outputPath], {
           windowsHide: true,
           shell: false,
         });
@@ -157,6 +158,241 @@ async function convertPdfToDocxLibreOffice(inputPath: string, outputPath: string
   } catch {
     return false;
   }
+}
+
+interface ExtractedPdfImage {
+  buffer: Buffer;
+  width: number;
+  height: number;
+}
+
+/** Extract embedded images page-by-page from PDF using pdf-lib + sharp */
+async function extractImagesFromPdf(pdfBytes: Buffer): Promise<Map<number, ExtractedPdfImage[]>> {
+  const imagesByPage = new Map<number, ExtractedPdfImage[]>();
+  try {
+    const loadedDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+    const pageCount = loadedDoc.getPageCount();
+
+    for (let pIdx = 0; pIdx < pageCount; pIdx++) {
+      const page = loadedDoc.getPage(pIdx);
+      const pageImages: ExtractedPdfImage[] = [];
+
+      try {
+        const res = page.node.Resources();
+        if (res) {
+          const xObjRef = res.get(PDFName.of('XObject'));
+          if (xObjRef) {
+            const xObj = loadedDoc.context.lookup(xObjRef);
+            if (xObj && typeof (xObj as any).entries === 'function') {
+              for (const [, ref] of (xObj as any).entries()) {
+                const stream = loadedDoc.context.lookup(ref);
+                if (stream instanceof PDFRawStream) {
+                  const dict = stream.dict;
+                  const subtype = dict.get(PDFName.of('Subtype'))?.toString();
+                  if (subtype === '/Image') {
+                    const filter = dict.get(PDFName.of('Filter'))?.toString() || '';
+                    const w = (dict.get(PDFName.of('Width')) as any)?.asNumber?.() || 300;
+                    const h = (dict.get(PDFName.of('Height')) as any)?.asNumber?.() || 200;
+                    const colorSpace = dict.get(PDFName.of('ColorSpace'))?.toString();
+
+                    let buf: Buffer | null = null;
+                    if (filter.includes('DCTDecode') || filter.includes('JPXDecode')) {
+                      try {
+                        buf = await sharp(Buffer.from(stream.contents)).png().toBuffer();
+                      } catch {}
+                    } else if (filter.includes('FlateDecode')) {
+                      try {
+                        const raw = zlib.inflateSync(Buffer.from(stream.contents));
+                        const channels = colorSpace === '/DeviceGray' ? 1 : 3;
+                        if (raw.length >= w * h * channels) {
+                          buf = await sharp(raw.subarray(0, w * h * channels), {
+                            raw: { width: w, height: h, channels: channels as 1 | 3 }
+                          }).png().toBuffer();
+                        }
+                      } catch {}
+                    }
+
+                    if (!buf) {
+                      try {
+                        buf = await sharp(Buffer.from(stream.contents)).png().toBuffer();
+                      } catch {}
+                    }
+
+                    if (buf) {
+                      pageImages.push({ buffer: buf, width: w, height: h });
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      } catch {}
+
+      if (pageImages.length > 0) {
+        imagesByPage.set(pIdx, pageImages);
+      }
+    }
+  } catch {}
+  return imagesByPage;
+}
+
+/** Pure JavaScript High-Fidelity PDF to DOCX converter (runs everywhere including serverless cloud) */
+async function convertPdfToDocxPureJs(inputPath: string, outputPath: string): Promise<void> {
+  const pdfBytes = await fs.promises.readFile(inputPath);
+  const imagesByPage = await extractImagesFromPdf(pdfBytes);
+
+  const PDFParser = require('pdf2json');
+  const parser = new PDFParser(null, 1);
+  const pdfData: any = await new Promise((resolve) => {
+    parser.on('pdfParser_dataReady', (data: any) => resolve(data));
+    parser.on('pdfParser_dataError', () => resolve(null));
+    parser.loadPDF(inputPath);
+  });
+
+  const children: any[] = [];
+  const totalPages = pdfData?.Pages?.length || 1;
+
+  for (let pIdx = 0; pIdx < totalPages; pIdx++) {
+    const pageData = pdfData?.Pages?.[pIdx];
+    const pageImages = imagesByPage.get(pIdx) || [];
+
+    // Page break for subsequent pages
+    if (pIdx > 0) {
+      children.push(new Paragraph({
+        children: [new TextRun({ text: '', break: 1 })],
+        pageBreakBefore: true,
+      }));
+    }
+
+    // Embed all extracted images on this page
+    for (const img of pageImages) {
+      const maxW = 520;
+      const maxH = 650;
+      let w = img.width;
+      let h = img.height;
+      if (w > maxW) {
+        h = Math.round(h * (maxW / w));
+        w = maxW;
+      }
+      if (h > maxH) {
+        w = Math.round(w * (maxH / h));
+        h = maxH;
+      }
+      children.push(new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 160, after: 160 },
+        children: [
+          new ImageRun({
+            data: img.buffer,
+            transformation: { width: Math.max(w, 20), height: Math.max(h, 20) },
+            type: 'png'
+          })
+        ]
+      }));
+    }
+
+    // Extract styled text lines grouped by Y coordinate
+    if (pageData?.Texts && pageData.Texts.length > 0) {
+      const lineMap = new Map<number, any[]>();
+      for (const t of pageData.Texts) {
+        // Group texts within ~0.25 line height
+        const lineKey = Math.round(t.y * 4) / 4;
+        if (!lineMap.has(lineKey)) lineMap.set(lineKey, []);
+        lineMap.get(lineKey)!.push(t);
+      }
+
+      const sortedYs = Array.from(lineMap.keys()).sort((a, b) => a - b);
+      for (const y of sortedYs) {
+        const lineItems = lineMap.get(y)!.sort((a, b) => a.x - b.x);
+        const runs: any[] = [];
+        let maxFontSize = 12;
+        let isAnyBold = false;
+        let align: (typeof AlignmentType)[keyof typeof AlignmentType] = AlignmentType.LEFT;
+
+        for (const item of lineItems) {
+          if (item.A === 'center') align = AlignmentType.CENTER;
+          else if (item.A === 'right') align = AlignmentType.RIGHT;
+
+          if (item.R) {
+            for (const r of item.R) {
+              let text = '';
+              try { text = decodeURIComponent(r.T); } catch { text = r.T; }
+              if (!text) continue;
+
+              const ts = r.TS || [0, 15, 0, 0];
+              const rawSize = ts[1] || 15;
+              const isBold = ts[2] === 1;
+              const isItalic = ts[3] === 1;
+
+              if (rawSize > maxFontSize) maxFontSize = rawSize;
+              if (isBold) isAnyBold = true;
+
+              // Convert to docx half-points (24 = 12pt, 32 = 16pt, 48 = 24pt)
+              const docxSize = Math.max(18, Math.min(64, Math.round(rawSize * 1.5)));
+
+              runs.push(new TextRun({
+                text: text + ' ',
+                size: docxSize,
+                bold: isBold,
+                italics: isItalic,
+              }));
+            }
+          }
+        }
+
+        if (runs.length > 0) {
+          let heading: any = undefined;
+          let spacing: { before?: number; after?: number } = { after: 100 };
+
+          if (maxFontSize >= 22 || (maxFontSize >= 18 && isAnyBold)) {
+            heading = HeadingLevel.HEADING_1;
+            spacing = { before: 240, after: 120 };
+          } else if (maxFontSize >= 17 || (maxFontSize >= 14 && isAnyBold)) {
+            heading = HeadingLevel.HEADING_2;
+            spacing = { before: 180, after: 80 };
+          }
+
+          children.push(new Paragraph({
+            children: runs,
+            alignment: align,
+            heading,
+            spacing,
+          }));
+        }
+      }
+    } else if (pageImages.length === 0) {
+      children.push(new Paragraph({
+        children: [new TextRun({ text: 'Page ' + (pIdx + 1), size: 24 })],
+        spacing: { after: 120 }
+      }));
+    }
+  }
+
+  if (children.length === 0) {
+    children.push(new Paragraph({
+      children: [new TextRun({ text: 'Converted Document (Empty)', size: 24 })]
+    }));
+  }
+
+  const doc = new Document({
+    sections: [{
+      properties: {
+        page: {
+          margin: {
+            top: 720,
+            right: 720,
+            bottom: 720,
+            left: 720,
+          }
+        }
+      },
+      children
+    }]
+  });
+
+  const docxBuffer = await Packer.toBuffer(doc);
+  await fs.promises.writeFile(outputPath, docxBuffer);
 }
 
 /** Extract structured text lines grouped by page and vertical position from PDF */
@@ -475,51 +711,10 @@ export async function convertFile(
         converted = await convertPdfToDocxLibreOffice(inputPath, outputPath);
       }
 
-      // Tier 3: Structured docx text fallback (works everywhere, pure Node.js in Serverless)
+      // Tier 3: High-Fidelity Pure JavaScript Engine (extracts embedded photos/images, fonts, weights, headings & layout)
       if (!converted) {
         setProgress(jobId, 80);
-        let pages: string[][] = [];
-        try {
-          pages = await extractPdfData(inputPath);
-        } catch {
-          pages = [];
-        }
-
-        const docChildren: any[] = [];
-        if (pages.length > 0) {
-          for (let p = 0; p < pages.length; p++) {
-            const lines = pages[p];
-            if (p > 0) {
-              docChildren.push(new Paragraph({
-                children: [new TextRun({ text: '', break: 1 })],
-                pageBreakBefore: true
-              }));
-            }
-            for (const line of lines) {
-              if (line.trim()) {
-                docChildren.push(new Paragraph({
-                  children: [new TextRun({ text: line, size: 24 })],
-                  spacing: { after: 120 }
-                }));
-              }
-            }
-          }
-        }
-
-        if (docChildren.length === 0) {
-          docChildren.push(new Paragraph({
-            children: [new TextRun({ text: 'Converted Document (No selectable text found in PDF)', size: 24 })]
-          }));
-        }
-
-        const doc = new Document({
-          sections: [{
-            properties: {},
-            children: docChildren
-          }]
-        });
-        const docxBuffer = await Packer.toBuffer(doc);
-        await fs.promises.writeFile(outputPath, docxBuffer);
+        await convertPdfToDocxPureJs(inputPath, outputPath);
       }
 
       setProgress(jobId, 100);
