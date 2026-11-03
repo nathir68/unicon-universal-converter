@@ -26,7 +26,6 @@
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
     "pdf2json": "^4.0.3",
-    "puppeteer-core": "^25.9.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-dropzone": "^20.1.1",

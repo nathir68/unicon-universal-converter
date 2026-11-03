@@ -4,6 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { execSync, spawn } from 'child_process';
 import { Document, Packer, Paragraph, TextRun } from 'docx';
+import { PDFDocument, StandardFonts, rgb, PageSizes } from 'pdf-lib';
 import { compressPdfImages } from './pdfCompressor';
 import { getProgress, setProgress, clearProgress } from './progress';
 import { getUploadsDir, getConvertedDir } from './tempStorage';
@@ -198,6 +199,112 @@ export async function cleanupOldFiles() {
       }
     } catch {}
   }
+}
+
+// ─── Pure JS Text/DOCX to PDF Generator ──────────────────────────────────────
+
+/** Convert extracted plain text or DOCX text into a structured, multi-page A4 PDF */
+async function convertTextOrDocxToPdf(
+  text: string,
+  outputPath: string,
+  title?: string
+): Promise<void> {
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
+
+  let page = doc.addPage(PageSizes.A4);
+  const { width, height } = page.getSize();
+  const margin = 50;
+  const maxWidth = width - margin * 2;
+  let y = height - margin;
+  const fontSize = 11;
+  const lineHeight = 16;
+
+  if (title) {
+    const cleanTitle = title.replace(/[^\x20-\x7E]/g, ' ').trim();
+    if (cleanTitle) {
+      page.drawText(cleanTitle, {
+        x: margin,
+        y,
+        size: 16,
+        font: boldFont,
+        color: rgb(0.1, 0.15, 0.3),
+      });
+      y -= 26;
+    }
+  }
+
+  const cleanText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const paragraphs = cleanText.split('\n');
+
+  for (const rawPara of paragraphs) {
+    const para = rawPara.replace(/[^\x20-\x7E\t]/g, ' ').trim();
+    if (!para) {
+      y -= lineHeight * 0.5;
+      continue;
+    }
+
+    const isHeading = (para.length < 50 && (para.endsWith(':') || para === para.toUpperCase())) || para.startsWith('#');
+    const displayPara = para.replace(/^#+\s*/, '');
+    const currentFont = isHeading ? boldFont : font;
+    const currentSize = isHeading ? 13 : fontSize;
+    const currentLineHeight = isHeading ? 19 : lineHeight;
+
+    const words = displayPara.split(/\s+/);
+    let currentLine = '';
+
+    for (const word of words) {
+      const testLine = currentLine ? `${currentLine} ${word}` : word;
+      let testWidth = 0;
+      try {
+        testWidth = currentFont.widthOfTextAtSize(testLine, currentSize);
+      } catch {
+        testWidth = testLine.length * currentSize * 0.6;
+      }
+
+      if (testWidth > maxWidth) {
+        if (y - currentLineHeight < margin) {
+          page = doc.addPage(PageSizes.A4);
+          y = height - margin;
+        }
+        try {
+          page.drawText(currentLine, {
+            x: margin,
+            y,
+            size: currentSize,
+            font: currentFont,
+            color: isHeading ? rgb(0.1, 0.15, 0.25) : rgb(0.15, 0.15, 0.15),
+          });
+        } catch {}
+        y -= currentLineHeight;
+        currentLine = word;
+      } else {
+        currentLine = testLine;
+      }
+    }
+
+    if (currentLine) {
+      if (y - currentLineHeight < margin) {
+        page = doc.addPage(PageSizes.A4);
+        y = height - margin;
+      }
+      try {
+        page.drawText(currentLine, {
+          x: margin,
+          y,
+          size: currentSize,
+          font: currentFont,
+          color: isHeading ? rgb(0.1, 0.15, 0.25) : rgb(0.15, 0.15, 0.15),
+        });
+      } catch {}
+      y -= currentLineHeight;
+    }
+    y -= 4;
+  }
+
+  const pdfBytes = await doc.save();
+  await fs.promises.writeFile(outputPath, pdfBytes);
 }
 
 // ─── Main Converter ───────────────────────────────────────────────────────────
@@ -428,31 +535,68 @@ export async function convertFile(
     }
   }
 
-  // DOCX -> PDF via Edge fallback if LibreOffice is absent
+  // ── DOCX → PDF Conversion (Universal: LibreOffice local, Mammoth+pdf-lib cloud) ──
   if (isDocxInput && targetFormat === 'pdf') {
     const soffice = findLibreOffice();
-    if (!soffice) {
-      const mammoth = await import('mammoth');
-      const puppeteer = await import('puppeteer-core');
-      const result = await mammoth.convertToHtml({ path: inputPath });
-      const html = `<html><head><style>body{font-family:sans-serif;padding:2rem;}</style></head><body>${result.value}</body></html>`;
-      const browser = await puppeteer.launch({
-        executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-        headless: true
-      });
-      const page = await browser.newPage();
-      await page.setContent(html, { waitUntil: 'domcontentloaded' });
-      await page.pdf({ path: outputPath, format: 'A4', margin: { top: '20px', right: '20px', bottom: '20px', left: '20px' } });
-      await browser.close();
-      setProgress(jobId, 100);
-      return;
+    if (soffice) {
+      const outDir = path.dirname(outputPath);
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const proc = spawn(/*turbopackIgnore: true*/ soffice, [
+            '--headless',
+            '--convert-to', 'pdf',
+            '--outdir', outDir,
+            inputPath
+          ], { windowsHide: true, shell: false });
+          proc.on('close', (code) => code === 0 ? resolve() : reject(new Error(`LibreOffice exited with code ${code}`)));
+          proc.on('error', reject);
+        });
+        const inputBaseName = path.basename(inputPath, path.extname(inputPath));
+        const loOutput = path.join(/*turbopackIgnore: true*/ outDir, `${inputBaseName}.pdf`);
+        if (loOutput !== outputPath && fs.existsSync(/*turbopackIgnore: true*/ loOutput)) {
+          await fs.promises.rename(loOutput, outputPath);
+        }
+        if (fs.existsSync(/*turbopackIgnore: true*/ outputPath)) {
+          setProgress(jobId, 100);
+          return;
+        }
+      } catch {}
     }
+
+    // Pure JS Fallback using Mammoth + pdf-lib (runs on Vercel without LibreOffice or Edge)
+    setProgress(jobId, 50);
+    const mammoth = await import('mammoth');
+    const result = await mammoth.extractRawText({ path: inputPath });
+    const text = result.value || 'Converted Document (Empty)';
+    const originalName = path.basename(inputPath, path.extname(inputPath));
+    await convertTextOrDocxToPdf(text, outputPath, originalName);
+    setProgress(jobId, 100);
+    return;
   }
 
-  // LibreOffice path for Office inputs (DOCX, PPTX, XLSX)
+  // ── TXT / HTML → PDF via pure pdf-lib ───────────────────────────────────────
+  if ((mimeType.includes('text/plain') || mimeType.includes('text/html') || inputExt === 'txt' || inputExt === 'html') && targetFormat === 'pdf') {
+    let content = await fs.promises.readFile(inputPath, 'utf8');
+    if (mimeType.includes('text/html') || inputExt === 'html') {
+      content = content.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+                       .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+                       .replace(/<[^>]+>/g, '\n')
+                       .replace(/&nbsp;/g, ' ')
+                       .replace(/&amp;/g, '&')
+                       .replace(/&lt;/g, '<')
+                       .replace(/&gt;/g, '>')
+                       .replace(/&quot;/g, '"');
+    }
+    const originalName = path.basename(inputPath, path.extname(inputPath));
+    await convertTextOrDocxToPdf(content, outputPath, originalName);
+    setProgress(jobId, 100);
+    return;
+  }
+
+  // LibreOffice path for remaining Office inputs (PPTX, XLSX)
   if (isOfficeInput) {
     const soffice = findLibreOffice();
-    if (!soffice) throw new Error('LibreOffice is required to convert Office (PPTX/XLSX/DOCX) files.');
+    if (!soffice) throw new Error('LibreOffice is required to convert Office presentations and spreadsheets (PPTX/XLSX).');
 
     const outDir = path.dirname(outputPath);
     const loFormat = targetFormat;
@@ -476,25 +620,6 @@ export async function convertFile(
     if (loOutput !== outputPath && fs.existsSync(/*turbopackIgnore: true*/ loOutput)) {
       await fs.promises.rename(loOutput, outputPath);
     }
-    setProgress(jobId, 100);
-    return;
-  }
-
-  // ── TXT / HTML → PDF via puppeteer ───────────────────────────────────────
-  if ((mimeType.includes('text/plain') || mimeType.includes('text/html')) && targetFormat === 'pdf') {
-    const puppeteer = await import('puppeteer-core');
-    let content = await fs.promises.readFile(inputPath, 'utf8');
-    if (mimeType.includes('text/plain')) {
-      content = `<html><head><style>body{font-family:monospace;white-space:pre-wrap;padding:2rem;}</style></head><body>${content.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</body></html>`;
-    }
-    const browser = await puppeteer.launch({
-      executablePath: 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-      headless: true
-    });
-    const page = await browser.newPage();
-    await page.setContent(content, { waitUntil: 'domcontentloaded' });
-    await page.pdf({ path: outputPath, format: 'A4', margin: { top: '20px', right: '20px', bottom: '20px', left: '20px' } });
-    await browser.close();
     setProgress(jobId, 100);
     return;
   }
