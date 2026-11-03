@@ -3,7 +3,7 @@ import ffmpeg from 'fluent-ffmpeg';
 import fs from 'fs';
 import path from 'path';
 import { execSync, spawn } from 'child_process';
-import { Document, Packer, Paragraph, TextRun, ImageRun, HeadingLevel, AlignmentType } from 'docx';
+import { Document, Packer, Paragraph, TextRun, ImageRun, HeadingLevel, AlignmentType, Table, TableRow, TableCell, BorderStyle, WidthType } from 'docx';
 import { PDFDocument, PDFName, PDFRawStream, StandardFonts, rgb, PageSizes } from 'pdf-lib';
 import zlib from 'zlib';
 import { compressPdfImages } from './pdfCompressor';
@@ -256,6 +256,8 @@ async function convertPdfToDocxPureJs(inputPath: string, outputPath: string): Pr
   for (let pIdx = 0; pIdx < totalPages; pIdx++) {
     const pageData = pdfData?.Pages?.[pIdx];
     const pageImages = imagesByPage.get(pIdx) || [];
+    const pageWidth = pageData?.Width || 37;
+    const hLines = pageData?.HLines || [];
 
     // Page break for subsequent pages
     if (pIdx > 0) {
@@ -292,78 +294,207 @@ async function convertPdfToDocxPureJs(inputPath: string, outputPath: string): Pr
       }));
     }
 
-    // Extract styled text lines grouped by Y coordinate
     if (pageData?.Texts && pageData.Texts.length > 0) {
-      const lineMap = new Map<number, any[]>();
+      // 1. Group text items into visual lines by Y coordinate
+      const linesMap = new Map<number, any[]>();
       for (const t of pageData.Texts) {
-        // Group texts within ~0.25 line height
-        const lineKey = Math.round(t.y * 4) / 4;
-        if (!lineMap.has(lineKey)) lineMap.set(lineKey, []);
-        lineMap.get(lineKey)!.push(t);
+        const yKey = Math.round(t.y * 5) / 5;
+        if (!linesMap.has(yKey)) linesMap.set(yKey, []);
+        linesMap.get(yKey)!.push(t);
       }
 
-      const sortedYs = Array.from(lineMap.keys()).sort((a, b) => a - b);
-      for (const y of sortedYs) {
-        const lineItems = lineMap.get(y)!.sort((a, b) => a.x - b.x);
-        const runs: any[] = [];
-        let maxFontSize = 12;
-        let isAnyBold = false;
-        let align: (typeof AlignmentType)[keyof typeof AlignmentType] = AlignmentType.LEFT;
+      const sortedYs = Array.from(linesMap.keys()).sort((a, b) => a - b);
+      const rawLines = sortedYs.map(y => {
+        const items = linesMap.get(y)!.sort((a, b) => a.x - b.x);
+        return { y, items };
+      });
 
-        for (const item of lineItems) {
-          if (item.A === 'center') align = AlignmentType.CENTER;
-          else if (item.A === 'right') align = AlignmentType.RIGHT;
+      for (let i = 0; i < rawLines.length; i++) {
+        const line = rawLines[i];
+        const items = line.items;
 
-          if (item.R) {
-            for (const r of item.R) {
-              let text = '';
-              try { text = decodeURIComponent(r.T); } catch { text = r.T; }
-              if (!text) continue;
+        // Check if line is a two-column split row (e.g. Degree on left, Expected date on right)
+        if (items.length >= 2) {
+          const first = items[0];
+          const last = items[items.length - 1];
+          const gap = last.x - (first.x + (first.w || 5));
+          if (first.x < 10 && last.x > 18 && gap > 4) {
+            const leftRuns: any[] = [];
+            for (let itIdx = 0; itIdx < items.length - 1; itIdx++) {
+              for (const r of items[itIdx].R) {
+                let t = '';
+                try { t = decodeURIComponent(r.T); } catch { t = r.T; }
+                leftRuns.push(new TextRun({
+                  text: t,
+                  bold: r.TS?.[2] === 1,
+                  italics: r.TS?.[3] === 1,
+                  size: Math.max(18, Math.min(36, Math.round((r.TS?.[1] || 14) * 1.5))),
+                  color: '000000'
+                }));
+              }
+            }
 
-              const ts = r.TS || [0, 15, 0, 0];
-              const rawSize = ts[1] || 15;
-              const isBold = ts[2] === 1;
-              const isItalic = ts[3] === 1;
-
-              if (rawSize > maxFontSize) maxFontSize = rawSize;
-              if (isBold) isAnyBold = true;
-
-              // Convert to docx half-points (24 = 12pt, 32 = 16pt, 48 = 24pt)
-              const docxSize = Math.max(18, Math.min(64, Math.round(rawSize * 1.5)));
-
-              runs.push(new TextRun({
-                text: text + ' ',
-                size: docxSize,
-                bold: isBold,
-                italics: isItalic,
+            const rightRuns: any[] = [];
+            for (const r of last.R) {
+              let t = '';
+              try { t = decodeURIComponent(r.T); } catch { t = r.T; }
+              rightRuns.push(new TextRun({
+                text: t,
+                bold: r.TS?.[2] === 1,
+                italics: r.TS?.[3] === 1,
+                size: Math.max(18, Math.min(36, Math.round((r.TS?.[1] || 14) * 1.5))),
+                color: '000000'
               }));
             }
+
+            children.push(new Table({
+              width: { size: 100, type: WidthType.PERCENTAGE },
+              borders: {
+                top: { style: BorderStyle.NONE },
+                bottom: { style: BorderStyle.NONE },
+                left: { style: BorderStyle.NONE },
+                right: { style: BorderStyle.NONE },
+                insideHorizontal: { style: BorderStyle.NONE },
+                insideVertical: { style: BorderStyle.NONE }
+              },
+              rows: [
+                new TableRow({
+                  children: [
+                    new TableCell({
+                      width: { size: 75, type: WidthType.PERCENTAGE },
+                      borders: { top: { style: BorderStyle.NONE }, bottom: { style: BorderStyle.NONE }, left: { style: BorderStyle.NONE }, right: { style: BorderStyle.NONE } },
+                      children: [new Paragraph({ children: leftRuns, spacing: { before: 60, after: 30 } })]
+                    }),
+                    new TableCell({
+                      width: { size: 25, type: WidthType.PERCENTAGE },
+                      borders: { top: { style: BorderStyle.NONE }, bottom: { style: BorderStyle.NONE }, left: { style: BorderStyle.NONE }, right: { style: BorderStyle.NONE } },
+                      children: [new Paragraph({ children: rightRuns, alignment: AlignmentType.RIGHT, spacing: { before: 60, after: 30 } })]
+                    })
+                  ]
+                })
+              ]
+            }));
+            continue;
           }
         }
 
-        if (runs.length > 0) {
-          let heading: any = undefined;
-          let spacing: { before?: number; after?: number } = { after: 100 };
+        // Collect runs and raw text for this line
+        let fullLineText = '';
+        const rawRuns: { text: string; bold: boolean; italics: boolean; size: number }[] = [];
+        for (const item of items) {
+          if (!item.R) continue;
+          for (const r of item.R) {
+            let txt = '';
+            try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
+            if (!txt) continue;
+            fullLineText += txt;
+            rawRuns.push({
+              text: txt,
+              bold: r.TS?.[2] === 1,
+              italics: r.TS?.[3] === 1,
+              size: Math.max(18, Math.min(48, Math.round((r.TS?.[1] || 14) * 1.5)))
+            });
+          }
+        }
 
-          if (maxFontSize >= 22 || (maxFontSize >= 18 && isAnyBold)) {
-            heading = HeadingLevel.HEADING_1;
-            spacing = { before: 240, after: 120 };
-          } else if (maxFontSize >= 17 || (maxFontSize >= 14 && isAnyBold)) {
-            heading = HeadingLevel.HEADING_2;
-            spacing = { before: 180, after: 80 };
+        const trimmed = fullLineText.trim();
+        if (!trimmed) continue;
+
+        const firstItem = items[0];
+        const totalW = items[items.length - 1].x + (items[items.length - 1].w || 2) - firstItem.x;
+        const isCentered = firstItem.x > 7 && (firstItem.x + totalW < pageWidth - 5);
+
+        const isUpper = trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed) && trimmed.length > 4;
+        const hasHLineBelow = hLines.some((hl: any) => Math.abs(hl.y - (line.y + 1.25)) < 1.0);
+        const isSectionHeading = (rawRuns.every(r => r.bold) && isUpper && trimmed.length < 60) || hasHLineBelow;
+        const isBullet = trimmed.startsWith('•') || trimmed.startsWith('- ') || trimmed.startsWith('* ');
+
+        if (isSectionHeading) {
+          children.push(new Paragraph({
+            children: rawRuns.map(r => new TextRun({ text: r.text, bold: true, italics: r.italics, size: Math.max(r.size, 22), color: '000000' })),
+            alignment: AlignmentType.LEFT,
+            spacing: { before: 200, after: 60 },
+            border: {
+              bottom: { style: BorderStyle.SINGLE, size: 6, color: '000000', space: 2 }
+            }
+          }));
+        } else if (isCentered) {
+          children.push(new Paragraph({
+            children: rawRuns.map(r => new TextRun({ text: r.text, bold: r.bold, italics: r.italics, size: r.size, color: '000000' })),
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 40 }
+          }));
+        } else if (isBullet) {
+          const cleanRuns = rawRuns.map((r, idx) => {
+            let t = r.text;
+            if (idx === 0) t = t.replace(/^[•\-\*]\s*/, '');
+            return new TextRun({ text: t, bold: r.bold, italics: r.italics, size: r.size, color: '000000' });
+          });
+          children.push(new Paragraph({
+            children: [new TextRun({ text: '•  ', bold: true, color: '000000' }), ...cleanRuns],
+            indent: { left: 360, hanging: 360 },
+            spacing: { after: 60 }
+          }));
+        } else {
+          // Regular paragraph: smart merge wrapped continuation lines into single paragraph
+          let mergedRuns = rawRuns.map(r => new TextRun({ text: r.text, bold: r.bold, italics: r.italics, size: r.size, color: '000000' }));
+          let lastLineY = line.y;
+
+          while (i + 1 < rawLines.length) {
+            const nextLine = rawLines[i + 1];
+            const nextItems = nextLine.items;
+            const nextFirst = nextItems[0];
+            const deltaY = nextLine.y - lastLineY;
+
+            let nextFull = '';
+            for (const it of nextItems) {
+              if (it.R) {
+                for (const r of it.R) {
+                  try { nextFull += decodeURIComponent(r.T); } catch { nextFull += r.T; }
+                }
+              }
+            }
+            const nextTrimmed = nextFull.trim();
+
+            const isNextHeading = (nextTrimmed === nextTrimmed.toUpperCase() && /[A-Z]/.test(nextTrimmed) && nextTrimmed.length > 4) || hLines.some((hl: any) => Math.abs(hl.y - (nextLine.y + 1.25)) < 1.0);
+            const isNextBullet = nextTrimmed.startsWith('•') || nextTrimmed.startsWith('- ') || nextTrimmed.startsWith('* ');
+            const isNextSplit = nextItems.length >= 2 && nextItems[0].x < 10 && nextItems[nextItems.length - 1].x > 18;
+
+            // Merge if vertically contiguous, aligned, and not a heading/bullet/split
+            if (deltaY < 1.6 && Math.abs(nextFirst.x - firstItem.x) < 0.8 && !isNextHeading && !isNextBullet && !isNextSplit) {
+              mergedRuns.push(new TextRun({ text: ' ', size: 20, color: '000000' }));
+              for (const it of nextItems) {
+                if (it.R) {
+                  for (const r of it.R) {
+                    let txt = '';
+                    try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
+                    mergedRuns.push(new TextRun({
+                      text: txt,
+                      bold: r.TS?.[2] === 1,
+                      italics: r.TS?.[3] === 1,
+                      size: Math.max(18, Math.min(48, Math.round((r.TS?.[1] || 14) * 1.5))),
+                      color: '000000'
+                    }));
+                  }
+                }
+              }
+              lastLineY = nextLine.y;
+              i++;
+            } else {
+              break;
+            }
           }
 
           children.push(new Paragraph({
-            children: runs,
-            alignment: align,
-            heading,
-            spacing,
+            children: mergedRuns,
+            alignment: AlignmentType.LEFT,
+            spacing: { after: 100 }
           }));
         }
       }
     } else if (pageImages.length === 0) {
       children.push(new Paragraph({
-        children: [new TextRun({ text: 'Page ' + (pIdx + 1), size: 24 })],
+        children: [new TextRun({ text: 'Page ' + (pIdx + 1), size: 24, color: '000000' })],
         spacing: { after: 120 }
       }));
     }
@@ -371,7 +502,7 @@ async function convertPdfToDocxPureJs(inputPath: string, outputPath: string): Pr
 
   if (children.length === 0) {
     children.push(new Paragraph({
-      children: [new TextRun({ text: 'Converted Document (Empty)', size: 24 })]
+      children: [new TextRun({ text: 'Converted Document (Empty)', size: 24, color: '000000' })]
     }));
   }
 
