@@ -51,7 +51,10 @@ function getAvailableFormats(fileName: string, mimeType: string): string[] {
     const all = ['mp3', 'wav', 'aac', 'flac', 'ogg'];
     return all.filter(f => f !== ext);
   }
-  return ['pdf', 'txt'];
+  if (['txt', 'html'].includes(ext) || mimeType.includes('text/plain') || mimeType.includes('text/html')) {
+    return ['pdf', 'docx', 'txt', 'html'].filter(f => f !== ext);
+  }
+  return ['pdf', 'txt', 'docx'];
 }
 
 function canCompress(fileName: string, mimeType: string): boolean {

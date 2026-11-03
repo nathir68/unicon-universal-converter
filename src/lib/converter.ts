@@ -9,12 +9,47 @@ import { compressPdfImages } from './pdfCompressor';
 import { getProgress, setProgress, clearProgress } from './progress';
 import { getUploadsDir, getConvertedDir } from './tempStorage';
 
-try {
-  const ffmpegStatic = require('ffmpeg-static');
-  if (ffmpegStatic) {
-    ffmpeg.setFfmpegPath(ffmpegStatic);
-  }
-} catch {}
+let ffmpegAvailable = false;
+function initFfmpeg() {
+  try {
+    const binaryName = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg';
+    const candidates = [
+      path.join(process.cwd(), 'node_modules', 'ffmpeg-static', binaryName),
+    ];
+    try {
+      const pkg = require.resolve('ffmpeg-static/package.json');
+      candidates.push(path.join(path.dirname(pkg), binaryName));
+    } catch {}
+    try {
+      const ffmpegStatic = require('ffmpeg-static');
+      if (typeof ffmpegStatic === 'string') {
+        candidates.push(ffmpegStatic);
+      }
+    } catch {}
+
+    for (const cand of candidates) {
+      if (fs.existsSync(/*turbopackIgnore: true*/ cand)) {
+        if (process.platform !== 'win32') {
+          try { fs.chmodSync(cand, 0o755); } catch {}
+        }
+        ffmpeg.setFfmpegPath(cand);
+        ffmpegAvailable = true;
+        return;
+      }
+    }
+
+    try {
+      const checkCmd = process.platform === 'win32' ? 'where ffmpeg' : 'which ffmpeg';
+      const out = execSync(checkCmd, { stdio: 'pipe' }).toString().trim();
+      if (out) {
+        ffmpeg.setFfmpegPath(out.split(/\r?\n/)[0]);
+        ffmpegAvailable = true;
+        return;
+      }
+    } catch {}
+  } catch {}
+}
+initFfmpeg();
 
 export { getProgress, setProgress, clearProgress };
 
@@ -384,6 +419,12 @@ export async function convertFile(
 
   // ── Video / Audio ─────────────────────────────────────────────────────────
   if (videoAudioFormats.includes(targetFormat)) {
+    if (!ffmpegAvailable) {
+      initFfmpeg();
+    }
+    if (!ffmpegAvailable) {
+      throw new Error(`Audio/Video conversion requires FFmpeg, which is not available in this environment.`);
+    }
     return new Promise((resolve, reject) => {
       let command = ffmpeg(inputPath).toFormat(targetFormat);
       if (isCompress) {
@@ -589,6 +630,26 @@ export async function convertFile(
     }
     const originalName = path.basename(inputPath, path.extname(inputPath));
     await convertTextOrDocxToPdf(content, outputPath, originalName);
+    setProgress(jobId, 100);
+    return;
+  }
+
+  // ── TXT → DOCX ────────────────────────────────────────────────────────────
+  if ((mimeType.includes('text/plain') || inputExt === 'txt') && (targetFormat === 'docx' || targetFormat === 'doc')) {
+    const content = await fs.promises.readFile(inputPath, 'utf8');
+    const lines = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    const docChildren = lines.map(line => new Paragraph({
+      children: [new TextRun({ text: line, size: 24 })],
+      spacing: { after: 100 }
+    }));
+    const doc = new Document({
+      sections: [{
+        properties: {},
+        children: docChildren.length > 0 ? docChildren : [new Paragraph({ children: [new TextRun('Empty Document')] })]
+      }]
+    });
+    const docxBuffer = await Packer.toBuffer(doc);
+    await fs.promises.writeFile(outputPath, docxBuffer);
     setProgress(jobId, 100);
     return;
   }
