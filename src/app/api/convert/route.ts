@@ -5,6 +5,9 @@ import { v4 as uuidv4 } from 'uuid';
 import { convertFile, cleanupJob, cleanupOldFiles } from '@/lib/converter';
 import { getUploadsDir, getConvertedDir } from '@/lib/tempStorage';
 
+export const dynamic = 'force-dynamic';
+export const maxDuration = 60; // Allow full execution window for heavy conversions on Vercel
+
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData();
@@ -40,9 +43,9 @@ export async function POST(request: NextRequest) {
     const outStat = await stat(/*turbopackIgnore: true*/ outputPath).catch(() => null);
     const outBuffer = await readFile(/*turbopackIgnore: true*/ outputPath).catch(() => null);
 
-    // Build base64 Data URL for instant, serverless-safe in-browser download (up to 4MB)
+    // Build base64 Data URL for instant, serverless-safe in-browser download (up to 2.5MB to stay well under Vercel's 4.5MB payload limit)
     let downloadDataUrl: string | undefined;
-    if (outBuffer && outBuffer.length <= 4 * 1024 * 1024) {
+    if (outBuffer && outBuffer.length <= 2.5 * 1024 * 1024) {
       const tf = targetFormat.toLowerCase();
       let mime = 'application/octet-stream';
       if (tf === 'docx') mime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';

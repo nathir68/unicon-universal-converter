@@ -88,6 +88,7 @@ function findGhostscript(): string | null {
 let cachedSoffice: string | null = null;
 /** Find LibreOffice soffice executable (prefers soffice.com for headless CLI without window popups) */
 function findLibreOffice(): string | null {
+  if (process.env.VERCEL) return null;
   if (cachedSoffice !== null) return cachedSoffice;
   const candidates = [
     'C:\\Program Files\\LibreOffice\\program\\soffice.com',
@@ -106,6 +107,9 @@ function findLibreOffice(): string | null {
 
 /** Convert PDF to DOCX using pdf2docx (Python) with high visual fidelity */
 async function convertPdfToDocxPython(inputPath: string, outputPath: string): Promise<boolean> {
+  // On Vercel serverless, external python modules are not installed; skip instantly to prevent timeout
+  if (process.env.VERCEL) return false;
+
   const pyCode = 'import sys; from pdf2docx import Converter; cv = Converter(sys.argv[1]); cv.convert(sys.argv[2]); cv.close()';
   const pyCandidates = ['python', 'py', 'python3'];
   
@@ -129,6 +133,7 @@ async function convertPdfToDocxPython(inputPath: string, outputPath: string): Pr
 
 /** Convert PDF to DOCX using LibreOffice as a fallback */
 async function convertPdfToDocxLibreOffice(inputPath: string, outputPath: string): Promise<boolean> {
+  if (process.env.VERCEL) return false;
   const soffice = findLibreOffice();
   if (!soffice) return false;
 
@@ -166,14 +171,18 @@ interface ExtractedPdfImage {
   height: number;
 }
 
-/** Extract embedded images page-by-page from PDF using pdf-lib + sharp */
+/** Extract embedded images page-by-page from PDF using pdf-lib + sharp with caching and safety limits */
 async function extractImagesFromPdf(pdfBytes: Buffer): Promise<Map<number, ExtractedPdfImage[]>> {
   const imagesByPage = new Map<number, ExtractedPdfImage[]>();
+  const imageCache = new Map<any, ExtractedPdfImage>();
+  let totalExtracted = 0;
+
   try {
     const loadedDoc = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
-    const pageCount = loadedDoc.getPageCount();
+    const pageCount = Math.min(loadedDoc.getPageCount(), 50);
 
     for (let pIdx = 0; pIdx < pageCount; pIdx++) {
+      if (totalExtracted >= 25) break;
       const page = loadedDoc.getPage(pIdx);
       const pageImages: ExtractedPdfImage[] = [];
 
@@ -185,6 +194,13 @@ async function extractImagesFromPdf(pdfBytes: Buffer): Promise<Map<number, Extra
             const xObj = loadedDoc.context.lookup(xObjRef);
             if (xObj && typeof (xObj as any).entries === 'function') {
               for (const [, ref] of (xObj as any).entries()) {
+                if (pageImages.length >= 6) break;
+
+                if (imageCache.has(ref)) {
+                  pageImages.push(imageCache.get(ref)!);
+                  continue;
+                }
+
                 const stream = loadedDoc.context.lookup(ref);
                 if (stream instanceof PDFRawStream) {
                   const dict = stream.dict;
@@ -193,9 +209,13 @@ async function extractImagesFromPdf(pdfBytes: Buffer): Promise<Map<number, Extra
                     const filter = dict.get(PDFName.of('Filter'))?.toString() || '';
                     const w = (dict.get(PDFName.of('Width')) as any)?.asNumber?.() || 300;
                     const h = (dict.get(PDFName.of('Height')) as any)?.asNumber?.() || 200;
-                    const colorSpace = dict.get(PDFName.of('ColorSpace'))?.toString();
 
+                    // Filter out 1x1 masks / icons / excessive dimensions
+                    if (w < 16 || h < 16 || w > 4000 || h > 4000) continue;
+
+                    const colorSpace = dict.get(PDFName.of('ColorSpace'))?.toString();
                     let buf: Buffer | null = null;
+
                     if (filter.includes('DCTDecode') || filter.includes('JPXDecode')) {
                       try {
                         buf = await sharp(Buffer.from(stream.contents)).png().toBuffer();
@@ -219,7 +239,10 @@ async function extractImagesFromPdf(pdfBytes: Buffer): Promise<Map<number, Extra
                     }
 
                     if (buf) {
-                      pageImages.push({ buffer: buf, width: w, height: h });
+                      const item: ExtractedPdfImage = { buffer: buf, width: w, height: h };
+                      imageCache.set(ref, item);
+                      pageImages.push(item);
+                      totalExtracted++;
                     }
                   }
                 }
@@ -242,89 +265,140 @@ async function convertPdfToDocxPureJs(inputPath: string, outputPath: string): Pr
   const pdfBytes = await fs.promises.readFile(inputPath);
   const imagesByPage = await extractImagesFromPdf(pdfBytes);
 
-  const PDFParser = require('pdf2json');
-  const parser = new PDFParser(null, 1);
-  const pdfData: any = await new Promise((resolve) => {
-    parser.on('pdfParser_dataReady', (data: any) => resolve(data));
-    parser.on('pdfParser_dataError', () => resolve(null));
-    parser.loadPDF(inputPath);
-  });
+  let pdfData: any = null;
+  try {
+    const PDFParser = require('pdf2json');
+    const parser = new PDFParser(null, 1);
+    pdfData = await new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve(null);
+        }
+      }, 5000);
 
-  const children: any[] = [];
-  const totalPages = pdfData?.Pages?.length || 1;
-
-  for (let pIdx = 0; pIdx < totalPages; pIdx++) {
-    const pageData = pdfData?.Pages?.[pIdx];
-    const pageImages = imagesByPage.get(pIdx) || [];
-    const pageWidth = pageData?.Width || 37;
-    const hLines = pageData?.HLines || [];
-
-    // Page break for subsequent pages
-    if (pIdx > 0) {
-      children.push(new Paragraph({
-        children: [new TextRun({ text: '', break: 1 })],
-        pageBreakBefore: true,
-      }));
-    }
-
-    // Embed all extracted images on this page
-    for (const img of pageImages) {
-      const maxW = 520;
-      const maxH = 650;
-      let w = img.width;
-      let h = img.height;
-      if (w > maxW) {
-        h = Math.round(h * (maxW / w));
-        w = maxW;
-      }
-      if (h > maxH) {
-        w = Math.round(w * (maxH / h));
-        h = maxH;
-      }
-      children.push(new Paragraph({
-        alignment: AlignmentType.CENTER,
-        spacing: { before: 160, after: 160 },
-        children: [
-          new ImageRun({
-            data: img.buffer,
-            transformation: { width: Math.max(w, 20), height: Math.max(h, 20) },
-            type: 'png'
-          })
-        ]
-      }));
-    }
-
-    if (pageData?.Texts && pageData.Texts.length > 0) {
-      // 1. Group text items into visual lines by Y coordinate
-      const linesMap = new Map<number, any[]>();
-      for (const t of pageData.Texts) {
-        const yKey = Math.round(t.y * 5) / 5;
-        if (!linesMap.has(yKey)) linesMap.set(yKey, []);
-        linesMap.get(yKey)!.push(t);
-      }
-
-      const sortedYs = Array.from(linesMap.keys()).sort((a, b) => a - b);
-      const rawLines = sortedYs.map(y => {
-        const items = linesMap.get(y)!.sort((a, b) => a.x - b.x);
-        return { y, items };
+      parser.on('pdfParser_dataReady', (data: any) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(data);
+        }
+      });
+      parser.on('pdfParser_dataError', () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(null);
+        }
       });
 
-      for (let i = 0; i < rawLines.length; i++) {
-        const line = rawLines[i];
-        const items = line.items;
+      try {
+        parser.parseBuffer(pdfBytes);
+      } catch {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(null);
+        }
+      }
+    });
+  } catch {
+    pdfData = null;
+  }
 
-        // Check if line is a two-column split row (e.g. Degree on left, Expected date on right)
-        if (items.length >= 2) {
-          const first = items[0];
-          const last = items[items.length - 1];
-          const gap = last.x - (first.x + (first.w || 5));
-          if (first.x < 10 && last.x > 18 && gap > 4) {
-            const leftRuns: any[] = [];
-            for (let itIdx = 0; itIdx < items.length - 1; itIdx++) {
-              for (const r of items[itIdx].R) {
+  const children: any[] = [];
+  const hasValidPdf2JsonText = pdfData?.Pages?.some((p: any) => p.Texts && p.Texts.length > 0);
+
+  if (hasValidPdf2JsonText) {
+    const totalPages = pdfData.Pages.length;
+
+    for (let pIdx = 0; pIdx < totalPages; pIdx++) {
+      const pageData = pdfData.Pages[pIdx];
+      const pageImages = imagesByPage.get(pIdx) || [];
+      const pageWidth = pageData?.Width || 37;
+      const hLines = pageData?.HLines || [];
+
+      // Page break for subsequent pages
+      if (pIdx > 0) {
+        children.push(new Paragraph({
+          children: [new TextRun({ text: '', break: 1 })],
+          pageBreakBefore: true,
+        }));
+      }
+
+      // Embed all extracted images on this page
+      for (const img of pageImages) {
+        const maxW = 520;
+        const maxH = 650;
+        let w = img.width;
+        let h = img.height;
+        if (w > maxW) {
+          h = Math.round(h * (maxW / w));
+          w = maxW;
+        }
+        if (h > maxH) {
+          w = Math.round(w * (maxH / h));
+          h = maxH;
+        }
+        children.push(new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { before: 160, after: 160 },
+          children: [
+            new ImageRun({
+              data: img.buffer,
+              transformation: { width: Math.max(w, 20), height: Math.max(h, 20) },
+              type: 'png'
+            })
+          ]
+        }));
+      }
+
+      if (pageData?.Texts && pageData.Texts.length > 0) {
+        // 1. Group text items into visual lines by Y coordinate
+        const linesMap = new Map<number, any[]>();
+        for (const t of pageData.Texts) {
+          const yKey = Math.round(t.y * 5) / 5;
+          if (!linesMap.has(yKey)) linesMap.set(yKey, []);
+          linesMap.get(yKey)!.push(t);
+        }
+
+        const sortedYs = Array.from(linesMap.keys()).sort((a, b) => a - b);
+        const rawLines = sortedYs.map(y => {
+          const items = linesMap.get(y)!.sort((a, b) => a.x - b.x);
+          return { y, items };
+        });
+
+        for (let i = 0; i < rawLines.length; i++) {
+          const line = rawLines[i];
+          const items = line.items;
+
+          // Check if line is a two-column split row (e.g. Degree on left, Expected date on right)
+          if (items.length >= 2) {
+            const first = items[0];
+            const last = items[items.length - 1];
+            const gap = last.x - (first.x + (first.w || 5));
+            if (first.x < 10 && last.x > 18 && gap > 4) {
+              const leftRuns: any[] = [];
+              for (let itIdx = 0; itIdx < items.length - 1; itIdx++) {
+                for (const r of items[itIdx].R) {
+                  let t = '';
+                  try { t = decodeURIComponent(r.T); } catch { t = r.T; }
+                  leftRuns.push(new TextRun({
+                    text: t,
+                    bold: r.TS?.[2] === 1,
+                    italics: r.TS?.[3] === 1,
+                    size: Math.max(18, Math.min(36, Math.round((r.TS?.[1] || 14) * 1.5))),
+                    color: '000000'
+                  }));
+                }
+              }
+
+              const rightRuns: any[] = [];
+              for (const r of last.R) {
                 let t = '';
                 try { t = decodeURIComponent(r.T); } catch { t = r.T; }
-                leftRuns.push(new TextRun({
+                rightRuns.push(new TextRun({
                   text: t,
                   bold: r.TS?.[2] === 1,
                   italics: r.TS?.[3] === 1,
@@ -332,177 +406,246 @@ async function convertPdfToDocxPureJs(inputPath: string, outputPath: string): Pr
                   color: '000000'
                 }));
               }
-            }
 
-            const rightRuns: any[] = [];
-            for (const r of last.R) {
-              let t = '';
-              try { t = decodeURIComponent(r.T); } catch { t = r.T; }
-              rightRuns.push(new TextRun({
-                text: t,
+              children.push(new Table({
+                width: { size: 100, type: WidthType.PERCENTAGE },
+                borders: {
+                  top: { style: BorderStyle.NONE },
+                  bottom: { style: BorderStyle.NONE },
+                  left: { style: BorderStyle.NONE },
+                  right: { style: BorderStyle.NONE },
+                  insideHorizontal: { style: BorderStyle.NONE },
+                  insideVertical: { style: BorderStyle.NONE }
+                },
+                rows: [
+                  new TableRow({
+                    children: [
+                      new TableCell({
+                        width: { size: 75, type: WidthType.PERCENTAGE },
+                        borders: { top: { style: BorderStyle.NONE }, bottom: { style: BorderStyle.NONE }, left: { style: BorderStyle.NONE }, right: { style: BorderStyle.NONE } },
+                        children: [new Paragraph({ children: leftRuns, spacing: { before: 60, after: 30 } })]
+                      }),
+                      new TableCell({
+                        width: { size: 25, type: WidthType.PERCENTAGE },
+                        borders: { top: { style: BorderStyle.NONE }, bottom: { style: BorderStyle.NONE }, left: { style: BorderStyle.NONE }, right: { style: BorderStyle.NONE } },
+                        children: [new Paragraph({ children: rightRuns, alignment: AlignmentType.RIGHT, spacing: { before: 60, after: 30 } })]
+                      })
+                    ]
+                  })
+                ]
+              }));
+              continue;
+            }
+          }
+
+          // Collect runs and raw text for this line
+          let fullLineText = '';
+          const rawRuns: { text: string; bold: boolean; italics: boolean; size: number }[] = [];
+          for (const item of items) {
+            if (!item.R) continue;
+            for (const r of item.R) {
+              let txt = '';
+              try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
+              if (!txt) continue;
+              fullLineText += txt;
+              rawRuns.push({
+                text: txt,
                 bold: r.TS?.[2] === 1,
                 italics: r.TS?.[3] === 1,
-                size: Math.max(18, Math.min(36, Math.round((r.TS?.[1] || 14) * 1.5))),
-                color: '000000'
-              }));
+                size: Math.max(18, Math.min(48, Math.round((r.TS?.[1] || 14) * 1.5)))
+              });
             }
-
-            children.push(new Table({
-              width: { size: 100, type: WidthType.PERCENTAGE },
-              borders: {
-                top: { style: BorderStyle.NONE },
-                bottom: { style: BorderStyle.NONE },
-                left: { style: BorderStyle.NONE },
-                right: { style: BorderStyle.NONE },
-                insideHorizontal: { style: BorderStyle.NONE },
-                insideVertical: { style: BorderStyle.NONE }
-              },
-              rows: [
-                new TableRow({
-                  children: [
-                    new TableCell({
-                      width: { size: 75, type: WidthType.PERCENTAGE },
-                      borders: { top: { style: BorderStyle.NONE }, bottom: { style: BorderStyle.NONE }, left: { style: BorderStyle.NONE }, right: { style: BorderStyle.NONE } },
-                      children: [new Paragraph({ children: leftRuns, spacing: { before: 60, after: 30 } })]
-                    }),
-                    new TableCell({
-                      width: { size: 25, type: WidthType.PERCENTAGE },
-                      borders: { top: { style: BorderStyle.NONE }, bottom: { style: BorderStyle.NONE }, left: { style: BorderStyle.NONE }, right: { style: BorderStyle.NONE } },
-                      children: [new Paragraph({ children: rightRuns, alignment: AlignmentType.RIGHT, spacing: { before: 60, after: 30 } })]
-                    })
-                  ]
-                })
-              ]
-            }));
-            continue;
           }
-        }
 
-        // Collect runs and raw text for this line
-        let fullLineText = '';
-        const rawRuns: { text: string; bold: boolean; italics: boolean; size: number }[] = [];
-        for (const item of items) {
-          if (!item.R) continue;
-          for (const r of item.R) {
-            let txt = '';
-            try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
-            if (!txt) continue;
-            fullLineText += txt;
-            rawRuns.push({
-              text: txt,
-              bold: r.TS?.[2] === 1,
-              italics: r.TS?.[3] === 1,
-              size: Math.max(18, Math.min(48, Math.round((r.TS?.[1] || 14) * 1.5)))
-            });
-          }
-        }
+          const trimmed = fullLineText.trim();
+          if (!trimmed) continue;
 
-        const trimmed = fullLineText.trim();
-        if (!trimmed) continue;
+          const firstItem = items[0];
+          const totalW = items[items.length - 1].x + (items[items.length - 1].w || 2) - firstItem.x;
+          const isCentered = firstItem.x > 7 && (firstItem.x + totalW < pageWidth - 5);
 
-        const firstItem = items[0];
-        const totalW = items[items.length - 1].x + (items[items.length - 1].w || 2) - firstItem.x;
-        const isCentered = firstItem.x > 7 && (firstItem.x + totalW < pageWidth - 5);
+          const isUpper = trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed) && trimmed.length > 4;
+          const hasHLineBelow = hLines.some((hl: any) => Math.abs(hl.y - (line.y + 1.25)) < 1.0);
+          const isSectionHeading = (rawRuns.every(r => r.bold) && isUpper && trimmed.length < 60) || hasHLineBelow;
+          const isBullet = trimmed.startsWith('•') || trimmed.startsWith('- ') || trimmed.startsWith('* ');
 
-        const isUpper = trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed) && trimmed.length > 4;
-        const hasHLineBelow = hLines.some((hl: any) => Math.abs(hl.y - (line.y + 1.25)) < 1.0);
-        const isSectionHeading = (rawRuns.every(r => r.bold) && isUpper && trimmed.length < 60) || hasHLineBelow;
-        const isBullet = trimmed.startsWith('•') || trimmed.startsWith('- ') || trimmed.startsWith('* ');
-
-        if (isSectionHeading) {
-          children.push(new Paragraph({
-            children: rawRuns.map(r => new TextRun({ text: r.text, bold: true, italics: r.italics, size: Math.max(r.size, 22), color: '000000' })),
-            alignment: AlignmentType.LEFT,
-            spacing: { before: 200, after: 60 },
-            border: {
-              bottom: { style: BorderStyle.SINGLE, size: 6, color: '000000', space: 2 }
-            }
-          }));
-        } else if (isCentered) {
-          children.push(new Paragraph({
-            children: rawRuns.map(r => new TextRun({ text: r.text, bold: r.bold, italics: r.italics, size: r.size, color: '000000' })),
-            alignment: AlignmentType.CENTER,
-            spacing: { after: 40 }
-          }));
-        } else if (isBullet) {
-          const cleanRuns = rawRuns.map((r, idx) => {
-            let t = r.text;
-            if (idx === 0) t = t.replace(/^[•\-\*]\s*/, '');
-            return new TextRun({ text: t, bold: r.bold, italics: r.italics, size: r.size, color: '000000' });
-          });
-          children.push(new Paragraph({
-            children: [new TextRun({ text: '•  ', bold: true, color: '000000' }), ...cleanRuns],
-            indent: { left: 360, hanging: 360 },
-            spacing: { after: 60 }
-          }));
-        } else {
-          // Regular paragraph: smart merge wrapped continuation lines into single paragraph
-          let mergedRuns = rawRuns.map(r => new TextRun({ text: r.text, bold: r.bold, italics: r.italics, size: r.size, color: '000000' }));
-          let lastLineY = line.y;
-
-          while (i + 1 < rawLines.length) {
-            const nextLine = rawLines[i + 1];
-            const nextItems = nextLine.items;
-            const nextFirst = nextItems[0];
-            const deltaY = nextLine.y - lastLineY;
-
-            let nextFull = '';
-            for (const it of nextItems) {
-              if (it.R) {
-                for (const r of it.R) {
-                  try { nextFull += decodeURIComponent(r.T); } catch { nextFull += r.T; }
-                }
+          if (isSectionHeading) {
+            children.push(new Paragraph({
+              children: rawRuns.map(r => new TextRun({ text: r.text, bold: true, italics: r.italics, size: Math.max(r.size, 22), color: '000000' })),
+              alignment: AlignmentType.LEFT,
+              spacing: { before: 200, after: 60 },
+              border: {
+                bottom: { style: BorderStyle.SINGLE, size: 6, color: '000000', space: 2 }
               }
-            }
-            const nextTrimmed = nextFull.trim();
+            }));
+          } else if (isCentered) {
+            children.push(new Paragraph({
+              children: rawRuns.map(r => new TextRun({ text: r.text, bold: r.bold, italics: r.italics, size: r.size, color: '000000' })),
+              alignment: AlignmentType.CENTER,
+              spacing: { after: 40 }
+            }));
+          } else if (isBullet) {
+            const cleanRuns = rawRuns.map((r, idx) => {
+              let t = r.text;
+              if (idx === 0) t = t.replace(/^[•\-\*]\s*/, '');
+              return new TextRun({ text: t, bold: r.bold, italics: r.italics, size: r.size, color: '000000' });
+            });
+            children.push(new Paragraph({
+              children: [new TextRun({ text: '•  ', bold: true, color: '000000' }), ...cleanRuns],
+              indent: { left: 360, hanging: 360 },
+              spacing: { after: 60 }
+            }));
+          } else {
+            // Regular paragraph: smart merge wrapped continuation lines into single paragraph
+            let mergedRuns = rawRuns.map(r => new TextRun({ text: r.text, bold: r.bold, italics: r.italics, size: r.size, color: '000000' }));
+            let lastLineY = line.y;
 
-            const isNextHeading = (nextTrimmed === nextTrimmed.toUpperCase() && /[A-Z]/.test(nextTrimmed) && nextTrimmed.length > 4) || hLines.some((hl: any) => Math.abs(hl.y - (nextLine.y + 1.25)) < 1.0);
-            const isNextBullet = nextTrimmed.startsWith('•') || nextTrimmed.startsWith('- ') || nextTrimmed.startsWith('* ');
-            const isNextSplit = nextItems.length >= 2 && nextItems[0].x < 10 && nextItems[nextItems.length - 1].x > 18;
+            while (i + 1 < rawLines.length) {
+              const nextLine = rawLines[i + 1];
+              const nextItems = nextLine.items;
+              const nextFirst = nextItems[0];
+              const deltaY = nextLine.y - lastLineY;
 
-            // Merge if vertically contiguous, aligned, and not a heading/bullet/split
-            if (deltaY < 1.6 && Math.abs(nextFirst.x - firstItem.x) < 0.8 && !isNextHeading && !isNextBullet && !isNextSplit) {
-              mergedRuns.push(new TextRun({ text: ' ', size: 20, color: '000000' }));
+              let nextFull = '';
               for (const it of nextItems) {
                 if (it.R) {
                   for (const r of it.R) {
-                    let txt = '';
-                    try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
-                    mergedRuns.push(new TextRun({
-                      text: txt,
-                      bold: r.TS?.[2] === 1,
-                      italics: r.TS?.[3] === 1,
-                      size: Math.max(18, Math.min(48, Math.round((r.TS?.[1] || 14) * 1.5))),
-                      color: '000000'
-                    }));
+                    try { nextFull += decodeURIComponent(r.T); } catch { nextFull += r.T; }
                   }
                 }
               }
-              lastLineY = nextLine.y;
-              i++;
-            } else {
-              break;
-            }
-          }
+              const nextTrimmed = nextFull.trim();
 
-          children.push(new Paragraph({
-            children: mergedRuns,
-            alignment: AlignmentType.LEFT,
-            spacing: { after: 100 }
-          }));
+              const isNextHeading = (nextTrimmed === nextTrimmed.toUpperCase() && /[A-Z]/.test(nextTrimmed) && nextTrimmed.length > 4) || hLines.some((hl: any) => Math.abs(hl.y - (nextLine.y + 1.25)) < 1.0);
+              const isNextBullet = nextTrimmed.startsWith('•') || nextTrimmed.startsWith('- ') || nextTrimmed.startsWith('* ');
+              const isNextSplit = nextItems.length >= 2 && nextItems[0].x < 10 && nextItems[nextItems.length - 1].x > 18;
+
+              // Merge if vertically contiguous, aligned, and not a heading/bullet/split
+              if (deltaY < 1.6 && Math.abs(nextFirst.x - firstItem.x) < 0.8 && !isNextHeading && !isNextBullet && !isNextSplit) {
+                mergedRuns.push(new TextRun({ text: ' ', size: 20, color: '000000' }));
+                for (const it of nextItems) {
+                  if (it.R) {
+                    for (const r of it.R) {
+                      let txt = '';
+                      try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
+                      mergedRuns.push(new TextRun({
+                        text: txt,
+                        bold: r.TS?.[2] === 1,
+                        italics: r.TS?.[3] === 1,
+                        size: Math.max(18, Math.min(48, Math.round((r.TS?.[1] || 14) * 1.5))),
+                        color: '000000'
+                      }));
+                    }
+                  }
+                }
+                lastLineY = nextLine.y;
+                i++;
+              } else {
+                break;
+              }
+            }
+
+            children.push(new Paragraph({
+              children: mergedRuns,
+              alignment: AlignmentType.LEFT,
+              spacing: { after: 100 }
+            }));
+          }
+        }
+      } else if (pageImages.length === 0) {
+        children.push(new Paragraph({
+          children: [new TextRun({ text: 'Page ' + (pIdx + 1), size: 24, color: '000000' })],
+          spacing: { after: 120 }
+        }));
+      }
+    }
+  } else {
+    // Robust Fallback using pdf-parse when pdf2json cannot parse or times out
+    let fallbackPages: { text: string; num: number }[] = [];
+    try {
+      const { PDFParse } = require('pdf-parse');
+      const parser = new PDFParse({ data: pdfBytes });
+      const parsed = await parser.getText();
+      if (parsed && Array.isArray(parsed.pages)) {
+        fallbackPages = parsed.pages;
+      }
+      await parser.destroy().catch(() => {});
+    } catch {}
+
+    const totalPages = Math.max(fallbackPages.length, imagesByPage.size, 1);
+    for (let pIdx = 0; pIdx < totalPages; pIdx++) {
+      const pageImages = imagesByPage.get(pIdx) || [];
+      const pageText = fallbackPages[pIdx]?.text || '';
+
+      if (pIdx > 0) {
+        children.push(new Paragraph({
+          children: [new TextRun({ text: '', break: 1 })],
+          pageBreakBefore: true,
+        }));
+      }
+
+      for (const img of pageImages) {
+        const maxW = 520;
+        const maxH = 650;
+        let w = img.width;
+        let h = img.height;
+        if (w > maxW) {
+          h = Math.round(h * (maxW / w));
+          w = maxW;
+        }
+        if (h > maxH) {
+          w = Math.round(w * (maxH / h));
+          h = maxH;
+        }
+        children.push(new Paragraph({
+          alignment: AlignmentType.CENTER,
+          spacing: { before: 160, after: 160 },
+          children: [
+            new ImageRun({
+              data: img.buffer,
+              transformation: { width: Math.max(w, 20), height: Math.max(h, 20) },
+              type: 'png'
+            })
+          ]
+        }));
+      }
+
+      if (pageText.trim()) {
+        const lines = pageText.split('\n');
+        for (const rawL of lines) {
+          const l = rawL.trim();
+          if (!l) continue;
+          const isUpper = l === l.toUpperCase() && /[A-Z]/.test(l) && l.length > 3 && l.length < 50;
+          const isBullet = l.startsWith('•') || l.startsWith('- ') || l.startsWith('* ');
+
+          if (isUpper) {
+            children.push(new Paragraph({
+              children: [new TextRun({ text: l, bold: true, size: 24, color: '000000' })],
+              spacing: { before: 200, after: 60 },
+              border: {
+                bottom: { style: BorderStyle.SINGLE, size: 6, color: '000000', space: 2 }
+              }
+            }));
+          } else if (isBullet) {
+            children.push(new Paragraph({
+              children: [new TextRun({ text: '•  ' + l.replace(/^[•\-\*]\s*/, ''), size: 21, color: '000000' })],
+              indent: { left: 360, hanging: 360 },
+              spacing: { after: 60 }
+            }));
+          } else {
+            children.push(new Paragraph({
+              children: [new TextRun({ text: l, size: 21, color: '000000' })],
+              spacing: { after: 80 }
+            }));
+          }
         }
       }
-    } else if (pageImages.length === 0) {
-      children.push(new Paragraph({
-        children: [new TextRun({ text: 'Page ' + (pIdx + 1), size: 24, color: '000000' })],
-        spacing: { after: 120 }
-      }));
     }
   }
 
   if (children.length === 0) {
     children.push(new Paragraph({
-      children: [new TextRun({ text: 'Converted Document (Empty)', size: 24, color: '000000' })]
+      children: [new TextRun({ text: 'Converted Document', size: 24, color: '000000' })]
     }));
   }
 
@@ -526,50 +669,90 @@ async function convertPdfToDocxPureJs(inputPath: string, outputPath: string): Pr
   await fs.promises.writeFile(outputPath, docxBuffer);
 }
 
-/** Extract structured text lines grouped by page and vertical position from PDF */
+/** Extract structured text lines grouped by page and vertical position from PDF (failsafe) */
 async function extractPdfData(inputPath: string): Promise<string[][]> {
-  const PDFParser = require('pdf2json');
-  return new Promise((resolve, reject) => {
+  const pdfBytes = await fs.promises.readFile(inputPath);
+
+  // 1. Try PDFParse first (super-fast, robust, never fails on malformed XRef)
+  try {
+    const { PDFParse } = require('pdf-parse');
+    const parser = new PDFParse({ data: pdfBytes });
+    const parsed = await parser.getText();
+    await parser.destroy().catch(() => {});
+    if (parsed && Array.isArray(parsed.pages) && parsed.pages.length > 0) {
+      return parsed.pages.map((p: any) =>
+        (p.text || '').split('\n').map((l: string) => l.trim()).filter((l: string) => l.length > 0)
+      );
+    }
+  } catch {}
+
+  // 2. Fallback to pdf2json
+  try {
+    const PDFParser = require('pdf2json');
     const pdfParser = new PDFParser(null, 1);
-    pdfParser.on('pdfParser_dataError', (e: any) => reject(new Error(e.parserError || 'Failed to parse PDF')));
-    pdfParser.on('pdfParser_dataReady', (pdfData: any) => {
-      try {
-        const pages: string[][] = [];
-        if (pdfData && pdfData.Pages) {
-          for (const page of pdfData.Pages) {
-            const pageLines: string[] = [];
-            const lineMap = new Map<number, string[]>();
-            if (page.Texts) {
-              for (const textItem of page.Texts) {
-                const y = Math.round(textItem.y * 10) / 10;
-                let textStr = '';
-                if (textItem.R) {
-                  for (const r of textItem.R) {
-                    try {
-                      textStr += decodeURIComponent(r.T);
-                    } catch {
-                      textStr += r.T;
+    return await new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve([['Text extraction timeout.']]);
+        }
+      }, 4000);
+
+      pdfParser.on('pdfParser_dataReady', (pdfData: any) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          const pages: string[][] = [];
+          if (pdfData && pdfData.Pages) {
+            for (const page of pdfData.Pages) {
+              const pageLines: string[] = [];
+              const lineMap = new Map<number, string[]>();
+              if (page.Texts) {
+                for (const textItem of page.Texts) {
+                  const y = Math.round(textItem.y * 10) / 10;
+                  let textStr = '';
+                  if (textItem.R) {
+                    for (const r of textItem.R) {
+                      try { textStr += decodeURIComponent(r.T); } catch { textStr += r.T; }
                     }
                   }
+                  if (!lineMap.has(y)) lineMap.set(y, []);
+                  lineMap.get(y)!.push(textStr);
                 }
-                if (!lineMap.has(y)) lineMap.set(y, []);
-                lineMap.get(y)!.push(textStr);
+                const sortedY = Array.from(lineMap.keys()).sort((a, b) => a - b);
+                for (const y of sortedY) {
+                  pageLines.push(lineMap.get(y)!.join(' ').trim());
+                }
               }
-              const sortedY = Array.from(lineMap.keys()).sort((a, b) => a - b);
-              for (const y of sortedY) {
-                pageLines.push(lineMap.get(y)!.join(' ').trim());
-              }
+              pages.push(pageLines);
             }
-            pages.push(pageLines);
           }
+          resolve(pages.length > 0 ? pages : [['No text found in PDF.']]);
         }
-        resolve(pages);
-      } catch (err) {
-        reject(err);
+      });
+
+      pdfParser.on('pdfParser_dataError', () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve([['Text extraction failed.']]);
+        }
+      });
+
+      try {
+        pdfParser.parseBuffer(pdfBytes);
+      } catch {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve([['Text extraction failed.']]);
+        }
       }
     });
-    pdfParser.loadPDF(inputPath);
-  });
+  } catch {
+    return [['Text extraction failed.']];
+  }
 }
 
 // ─── Progress Tracking & Cleanup ──────────────────────────────────────────
@@ -661,216 +844,312 @@ async function convertPdfToHtmlPureJs(inputPath: string, outputPath: string): Pr
   const pdfBytes = await fs.promises.readFile(inputPath);
   const imagesByPage = await extractImagesFromPdf(pdfBytes);
 
-  const PDFParser = require('pdf2json');
-  const parser = new PDFParser(null, 1);
-  const pdfData: any = await new Promise((resolve) => {
-    parser.on('pdfParser_dataReady', (data: any) => resolve(data));
-    parser.on('pdfParser_dataError', () => resolve(null));
-    parser.loadPDF(inputPath);
-  });
+  let pdfData: any = null;
+  try {
+    const PDFParser = require('pdf2json');
+    const parser = new PDFParser(null, 1);
+    pdfData = await new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          resolve(null);
+        }
+      }, 5000);
 
-  const totalPages = pdfData?.Pages?.length || 1;
-  const pageSections: string[] = [];
-
-  for (let pIdx = 0; pIdx < totalPages; pIdx++) {
-    const pageData = pdfData?.Pages?.[pIdx];
-    const pageImages = imagesByPage.get(pIdx) || [];
-    const pageWidth = pageData?.Width || 37;
-    const hLines = pageData?.HLines || [];
-
-    const pageElements: string[] = [];
-
-    // Embedded images
-    for (const img of pageImages) {
-      const b64 = img.buffer.toString('base64');
-      pageElements.push(
-        `<div style="text-align: center; margin: 1.5rem 0;">` +
-        `<img src="data:image/png;base64,${b64}" style="max-width: 100%; max-height: 400px; height: auto; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.08);" />` +
-        `</div>`
-      );
-    }
-
-    if (pageData?.Texts && pageData.Texts.length > 0) {
-      // Group text items by line Y coordinate
-      const linesMap = new Map<number, any[]>();
-      for (const t of pageData.Texts) {
-        const yKey = Math.round(t.y * 5) / 5;
-        if (!linesMap.has(yKey)) linesMap.set(yKey, []);
-        linesMap.get(yKey)!.push(t);
-      }
-
-      const sortedYs = Array.from(linesMap.keys()).sort((a, b) => a - b);
-      const rawLines = sortedYs.map(y => {
-        const items = linesMap.get(y)!.sort((a, b) => a.x - b.x);
-        return { y, items };
+      parser.on('pdfParser_dataReady', (data: any) => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(data);
+        }
+      });
+      parser.on('pdfParser_dataError', () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(null);
+        }
       });
 
-      for (let i = 0; i < rawLines.length; i++) {
-        const line = rawLines[i];
-        const items = line.items;
+      try {
+        parser.parseBuffer(pdfBytes);
+      } catch {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timer);
+          resolve(null);
+        }
+      }
+    });
+  } catch {
+    pdfData = null;
+  }
 
-        // Check for 2-column split row
-        if (items.length >= 2) {
-          const first = items[0];
-          const last = items[items.length - 1];
-          const gap = last.x - (first.x + (first.w || 5));
-          if (first.x < 10 && last.x > 18 && gap > 4) {
-            let leftHtml = '';
-            for (let itIdx = 0; itIdx < items.length - 1; itIdx++) {
-              for (const r of items[itIdx].R) {
+  const pageSections: string[] = [];
+  const hasValidPdf2JsonText = pdfData?.Pages?.some((p: any) => p.Texts && p.Texts.length > 0);
+
+  if (hasValidPdf2JsonText) {
+    const totalPages = pdfData.Pages.length;
+
+    for (let pIdx = 0; pIdx < totalPages; pIdx++) {
+      const pageData = pdfData.Pages[pIdx];
+      const pageImages = imagesByPage.get(pIdx) || [];
+      const pageWidth = pageData?.Width || 37;
+      const hLines = pageData?.HLines || [];
+
+      const pageElements: string[] = [];
+
+      // Embedded images
+      for (const img of pageImages) {
+        const b64 = img.buffer.toString('base64');
+        pageElements.push(
+          `<div style="text-align: center; margin: 1.5rem 0;">` +
+          `<img src="data:image/png;base64,${b64}" style="max-width: 100%; max-height: 400px; height: auto; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.08);" />` +
+          `</div>`
+        );
+      }
+
+      if (pageData?.Texts && pageData.Texts.length > 0) {
+        // Group text items by line Y coordinate
+        const linesMap = new Map<number, any[]>();
+        for (const t of pageData.Texts) {
+          const yKey = Math.round(t.y * 5) / 5;
+          if (!linesMap.has(yKey)) linesMap.set(yKey, []);
+          linesMap.get(yKey)!.push(t);
+        }
+
+        const sortedYs = Array.from(linesMap.keys()).sort((a, b) => a - b);
+        const rawLines = sortedYs.map(y => {
+          const items = linesMap.get(y)!.sort((a, b) => a.x - b.x);
+          return { y, items };
+        });
+
+        for (let i = 0; i < rawLines.length; i++) {
+          const line = rawLines[i];
+          const items = line.items;
+
+          // Check for 2-column split row
+          if (items.length >= 2) {
+            const first = items[0];
+            const last = items[items.length - 1];
+            const gap = last.x - (first.x + (first.w || 5));
+            if (first.x < 10 && last.x > 18 && gap > 4) {
+              let leftHtml = '';
+              for (let itIdx = 0; itIdx < items.length - 1; itIdx++) {
+                for (const r of items[itIdx].R) {
+                  let t = '';
+                  try { t = decodeURIComponent(r.T); } catch { t = r.T; }
+                  const isB = r.TS?.[2] === 1;
+                  const isI = r.TS?.[3] === 1;
+                  if (isB && isI) leftHtml += `<strong><em>${escapeHtml(t)}</em></strong> `;
+                  else if (isB) leftHtml += `<strong>${escapeHtml(t)}</strong> `;
+                  else if (isI) leftHtml += `<em>${escapeHtml(t)}</em> `;
+                  else leftHtml += `${escapeHtml(t)} `;
+                }
+              }
+
+              let rightHtml = '';
+              for (const r of last.R) {
                 let t = '';
                 try { t = decodeURIComponent(r.T); } catch { t = r.T; }
                 const isB = r.TS?.[2] === 1;
                 const isI = r.TS?.[3] === 1;
-                if (isB && isI) leftHtml += `<strong><em>${escapeHtml(t)}</em></strong> `;
-                else if (isB) leftHtml += `<strong>${escapeHtml(t)}</strong> `;
-                else if (isI) leftHtml += `<em>${escapeHtml(t)}</em> `;
-                else leftHtml += `${escapeHtml(t)} `;
+                if (isB && isI) rightHtml += `<strong><em>${escapeHtml(t)}</em></strong> `;
+                else if (isB) rightHtml += `<strong>${escapeHtml(t)}</strong> `;
+                else if (isI) rightHtml += `<em>${escapeHtml(t)}</em> `;
+                else rightHtml += `${escapeHtml(t)} `;
               }
-            }
 
-            let rightHtml = '';
-            for (const r of last.R) {
-              let t = '';
-              try { t = decodeURIComponent(r.T); } catch { t = r.T; }
-              const isB = r.TS?.[2] === 1;
-              const isI = r.TS?.[3] === 1;
-              if (isB && isI) rightHtml += `<strong><em>${escapeHtml(t)}</em></strong> `;
-              else if (isB) rightHtml += `<strong>${escapeHtml(t)}</strong> `;
-              else if (isI) rightHtml += `<em>${escapeHtml(t)}</em> `;
-              else rightHtml += `${escapeHtml(t)} `;
+              pageElements.push(
+                `<div style="display: flex; justify-content: space-between; align-items: baseline; margin: 0.4rem 0;">` +
+                `<div style="flex: 1;">${leftHtml.trim()}</div>` +
+                `<div style="text-align: right; color: #374151;">${rightHtml.trim()}</div>` +
+                `</div>`
+              );
+              continue;
             }
+          }
 
+          let fullLineText = '';
+          const rawRuns: { text: string; bold: boolean; italics: boolean; size: number }[] = [];
+          for (const item of items) {
+            if (!item.R) continue;
+            for (const r of item.R) {
+              let txt = '';
+              try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
+              if (!txt) continue;
+              fullLineText += txt;
+              rawRuns.push({
+                text: txt,
+                bold: r.TS?.[2] === 1,
+                italics: r.TS?.[3] === 1,
+                size: r.TS?.[1] || 14
+              });
+            }
+          }
+
+          const trimmed = fullLineText.trim();
+          if (!trimmed) continue;
+
+          const firstItem = items[0];
+          const totalW = items[items.length - 1].x + (items[items.length - 1].w || 2) - firstItem.x;
+          const isCentered = firstItem.x > 7 && (firstItem.x + totalW < pageWidth - 5);
+
+          const isUpper = trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed) && trimmed.length > 4;
+          const hasHLineBelow = hLines.some((hl: any) => Math.abs(hl.y - (line.y + 1.25)) < 1.0);
+          const isSectionHeading = (rawRuns.every(r => r.bold) && isUpper && trimmed.length < 60) || hasHLineBelow;
+          const isBullet = trimmed.startsWith('•') || trimmed.startsWith('- ') || trimmed.startsWith('* ');
+
+          if (isSectionHeading) {
+            const headingText = rawRuns.map(r => r.text).join(' ').trim();
             pageElements.push(
-              `<div style="display: flex; justify-content: space-between; align-items: baseline; margin: 0.4rem 0;">` +
-              `<div style="flex: 1;">${leftHtml.trim()}</div>` +
-              `<div style="text-align: right; color: #374151;">${rightHtml.trim()}</div>` +
-              `</div>`
+              `<h2 style="font-size: 13pt; font-weight: bold; text-transform: uppercase; border-bottom: 1.5px solid #000; padding-bottom: 3px; margin: 1.6rem 0 0.5rem 0; color: #000; letter-spacing: 0.5px;">` +
+              `${escapeHtml(headingText)}` +
+              `</h2>`
             );
-            continue;
-          }
-        }
-
-        let fullLineText = '';
-        const rawRuns: { text: string; bold: boolean; italics: boolean; size: number }[] = [];
-        for (const item of items) {
-          if (!item.R) continue;
-          for (const r of item.R) {
-            let txt = '';
-            try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
-            if (!txt) continue;
-            fullLineText += txt;
-            rawRuns.push({
-              text: txt,
-              bold: r.TS?.[2] === 1,
-              italics: r.TS?.[3] === 1,
-              size: r.TS?.[1] || 14
-            });
-          }
-        }
-
-        const trimmed = fullLineText.trim();
-        if (!trimmed) continue;
-
-        const firstItem = items[0];
-        const totalW = items[items.length - 1].x + (items[items.length - 1].w || 2) - firstItem.x;
-        const isCentered = firstItem.x > 7 && (firstItem.x + totalW < pageWidth - 5);
-
-        const isUpper = trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed) && trimmed.length > 4;
-        const hasHLineBelow = hLines.some((hl: any) => Math.abs(hl.y - (line.y + 1.25)) < 1.0);
-        const isSectionHeading = (rawRuns.every(r => r.bold) && isUpper && trimmed.length < 60) || hasHLineBelow;
-        const isBullet = trimmed.startsWith('•') || trimmed.startsWith('- ') || trimmed.startsWith('* ');
-
-        if (isSectionHeading) {
-          const headingText = rawRuns.map(r => r.text).join(' ').trim();
-          pageElements.push(
-            `<h2 style="font-size: 13pt; font-weight: bold; text-transform: uppercase; border-bottom: 1.5px solid #000; padding-bottom: 3px; margin: 1.6rem 0 0.5rem 0; color: #000; letter-spacing: 0.5px;">` +
-            `${escapeHtml(headingText)}` +
-            `</h2>`
-          );
-        } else if (isCentered) {
-          let inner = '';
-          for (const r of rawRuns) {
-            let seg = escapeHtml(r.text);
-            if (r.bold && r.italics) seg = `<strong><em>${seg}</em></strong>`;
-            else if (r.bold) seg = `<strong>${seg}</strong>`;
-            else if (r.italics) seg = `<em>${seg}</em>`;
-            inner += seg + ' ';
-          }
-          const fontSizeStyle = rawRuns[0]?.size > 18 ? 'font-size: 18pt; font-weight: bold;' : 'font-size: 10.5pt;';
-          pageElements.push(
-            `<div style="text-align: center; margin: 0.25rem 0; ${fontSizeStyle} color: #000;">${inner.trim()}</div>`
-          );
-        } else if (isBullet) {
-          let cleanText = trimmed.replace(/^[•\-\*]\s*/, '');
-          pageElements.push(
-            `<ul style="margin: 0.35rem 0; padding-left: 1.6rem;"><li style="margin-bottom: 0.25rem; line-height: 1.5; color: #111;">${escapeHtml(cleanText)}</li></ul>`
-          );
-        } else {
-          // Flowing paragraph with continuation merging
-          let fullRuns = [...rawRuns];
-          let lastLineY = line.y;
-
-          while (i + 1 < rawLines.length) {
-            const nextLine = rawLines[i + 1];
-            const nextItems = nextLine.items;
-            const nextFirst = nextItems[0];
-            const deltaY = nextLine.y - lastLineY;
-
-            let nextFull = '';
-            for (const it of nextItems) {
-              if (it.R) {
-                for (const r of it.R) {
-                  try { nextFull += decodeURIComponent(r.T); } catch { nextFull += r.T; }
-                }
-              }
+          } else if (isCentered) {
+            let inner = '';
+            for (const r of rawRuns) {
+              let seg = escapeHtml(r.text);
+              if (r.bold && r.italics) seg = `<strong><em>${seg}</em></strong>`;
+              else if (r.bold) seg = `<strong>${seg}</strong>`;
+              else if (r.italics) seg = `<em>${seg}</em>`;
+              inner += seg + ' ';
             }
-            const nextTrimmed = nextFull.trim();
-            const isNextHeading = (nextTrimmed === nextTrimmed.toUpperCase() && /[A-Z]/.test(nextTrimmed) && nextTrimmed.length > 4) || hLines.some((hl: any) => Math.abs(hl.y - (nextLine.y + 1.25)) < 1.0);
-            const isNextBullet = nextTrimmed.startsWith('•') || nextTrimmed.startsWith('- ');
-            const isNextSplit = nextItems.length >= 2 && nextItems[0].x < 10 && nextItems[nextItems.length - 1].x > 18;
+            const fontSizeStyle = rawRuns[0]?.size > 18 ? 'font-size: 18pt; font-weight: bold;' : 'font-size: 10.5pt;';
+            pageElements.push(
+              `<div style="text-align: center; margin: 0.25rem 0; ${fontSizeStyle} color: #000;">${inner.trim()}</div>`
+            );
+          } else if (isBullet) {
+            let cleanText = trimmed.replace(/^[•\-\*]\s*/, '');
+            pageElements.push(
+              `<ul style="margin: 0.35rem 0; padding-left: 1.6rem;"><li style="margin-bottom: 0.25rem; line-height: 1.5; color: #111;">${escapeHtml(cleanText)}</li></ul>`
+            );
+          } else {
+            // Flowing paragraph with continuation merging
+            let fullRuns = [...rawRuns];
+            let lastLineY = line.y;
 
-            if (deltaY < 1.6 && Math.abs(nextFirst.x - firstItem.x) < 0.8 && !isNextHeading && !isNextBullet && !isNextSplit) {
+            while (i + 1 < rawLines.length) {
+              const nextLine = rawLines[i + 1];
+              const nextItems = nextLine.items;
+              const nextFirst = nextItems[0];
+              const deltaY = nextLine.y - lastLineY;
+
+              let nextFull = '';
               for (const it of nextItems) {
                 if (it.R) {
                   for (const r of it.R) {
-                    let txt = '';
-                    try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
-                    fullRuns.push({
-                      text: txt,
-                      bold: r.TS?.[2] === 1,
-                      italics: r.TS?.[3] === 1,
-                      size: r.TS?.[1] || 14
-                    });
+                    try { nextFull += decodeURIComponent(r.T); } catch { nextFull += r.T; }
                   }
                 }
               }
-              lastLineY = nextLine.y;
-              i++;
-            } else {
-              break;
+              const nextTrimmed = nextFull.trim();
+              const isNextHeading = (nextTrimmed === nextTrimmed.toUpperCase() && /[A-Z]/.test(nextTrimmed) && nextTrimmed.length > 4) || hLines.some((hl: any) => Math.abs(hl.y - (nextLine.y + 1.25)) < 1.0);
+              const isNextBullet = nextTrimmed.startsWith('•') || nextTrimmed.startsWith('- ');
+              const isNextSplit = nextItems.length >= 2 && nextItems[0].x < 10 && nextItems[nextItems.length - 1].x > 18;
+
+              if (deltaY < 1.6 && Math.abs(nextFirst.x - firstItem.x) < 0.8 && !isNextHeading && !isNextBullet && !isNextSplit) {
+                for (const it of nextItems) {
+                  if (it.R) {
+                    for (const r of it.R) {
+                      let txt = '';
+                      try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
+                      fullRuns.push({
+                        text: txt,
+                        bold: r.TS?.[2] === 1,
+                        italics: r.TS?.[3] === 1,
+                        size: r.TS?.[1] || 14
+                      });
+                    }
+                  }
+                }
+                lastLineY = nextLine.y;
+                i++;
+              } else {
+                break;
+              }
             }
-          }
 
-          let pContent = '';
-          for (const r of fullRuns) {
-            let seg = escapeHtml(r.text);
-            if (r.bold && r.italics) seg = `<strong><em>${seg}</em></strong>`;
-            else if (r.bold) seg = `<strong>${seg}</strong>`;
-            else if (r.italics) seg = `<em>${seg}</em>`;
-            pContent += seg + ' ';
-          }
+            let pContent = '';
+            for (const r of fullRuns) {
+              let seg = escapeHtml(r.text);
+              if (r.bold && r.italics) seg = `<strong><em>${seg}</em></strong>`;
+              else if (r.bold) seg = `<strong>${seg}</strong>`;
+              else if (r.italics) seg = `<em>${seg}</em>`;
+              pContent += seg + ' ';
+            }
 
-          pageElements.push(
-            `<p style="margin: 0.6rem 0; line-height: 1.6; text-align: justify; color: #111;">${pContent.trim()}</p>`
-          );
+            pageElements.push(
+              `<p style="margin: 0.6rem 0; line-height: 1.6; text-align: justify; color: #111;">${pContent.trim()}</p>`
+            );
+          }
         }
       }
-    }
 
-    pageSections.push(
-      `<div class="page">\n${pageElements.join('\n')}\n</div>`
-    );
+      pageSections.push(
+        `<div class="page">\n${pageElements.join('\n')}\n</div>`
+      );
+    }
+  } else {
+    // Robust Fallback using pdf-parse for HTML
+    let fallbackPages: { text: string; num: number }[] = [];
+    try {
+      const { PDFParse } = require('pdf-parse');
+      const parser = new PDFParse({ data: pdfBytes });
+      const parsed = await parser.getText();
+      if (parsed && Array.isArray(parsed.pages)) {
+        fallbackPages = parsed.pages;
+      }
+      await parser.destroy().catch(() => {});
+    } catch {}
+
+    const totalPages = Math.max(fallbackPages.length, imagesByPage.size, 1);
+    for (let pIdx = 0; pIdx < totalPages; pIdx++) {
+      const pageImages = imagesByPage.get(pIdx) || [];
+      const pageText = fallbackPages[pIdx]?.text || '';
+      const pageElements: string[] = [];
+
+      for (const img of pageImages) {
+        const b64 = img.buffer.toString('base64');
+        pageElements.push(
+          `<div style="text-align: center; margin: 1.5rem 0;">` +
+          `<img src="data:image/png;base64,${b64}" style="max-width: 100%; max-height: 400px; height: auto; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.08);" />` +
+          `</div>`
+        );
+      }
+
+      if (pageText.trim()) {
+        const lines = pageText.split('\n');
+        for (const rawL of lines) {
+          const l = rawL.trim();
+          if (!l) continue;
+          const isUpper = l === l.toUpperCase() && /[A-Z]/.test(l) && l.length > 3 && l.length < 50;
+          const isBullet = l.startsWith('•') || l.startsWith('- ') || l.startsWith('* ');
+
+          if (isUpper) {
+            pageElements.push(
+              `<h2 style="font-size: 13pt; font-weight: bold; text-transform: uppercase; border-bottom: 1.5px solid #000; padding-bottom: 3px; margin: 1.6rem 0 0.5rem 0; color: #000; letter-spacing: 0.5px;">` +
+              `${escapeHtml(l)}` +
+              `</h2>`
+            );
+          } else if (isBullet) {
+            pageElements.push(
+              `<ul style="margin: 0.35rem 0; padding-left: 1.6rem;"><li style="margin-bottom: 0.25rem; line-height: 1.5; color: #111;">${escapeHtml(l.replace(/^[•\-\*]\s*/, ''))}</li></ul>`
+            );
+          } else {
+            pageElements.push(
+              `<p style="margin: 0.6rem 0; line-height: 1.6; text-align: justify; color: #111;">${escapeHtml(l)}</p>`
+            );
+          }
+        }
+      }
+
+      pageSections.push(
+        `<div class="page">\n${pageElements.join('\n')}\n</div>`
+      );
+    }
   }
 
   const fullHtml = wrapInA4Template(pageSections.join('\n\n'), path.basename(inputPath));

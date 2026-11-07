@@ -292,8 +292,22 @@ export function FileUploader() {
       formData.append('targetFormat', tf);
 
       try {
-        const resPromise = fetch('/api/convert', { method: 'POST', body: formData }).then(r => r.json());
-        const res = await resPromise;
+        const response = await fetch('/api/convert', { method: 'POST', body: formData });
+
+        if (!response.ok) {
+          let errorMsg = `Server error (${response.status})`;
+          try {
+            const errJson = await response.json();
+            errorMsg = errJson.error || errorMsg;
+          } catch {
+            const text = await response.text();
+            if (text) errorMsg = text.slice(0, 150);
+          }
+          updateJob(job.id, { status: 'error', error: errorMsg });
+          continue;
+        }
+
+        const res = await response.json();
 
         if (res.success && (res.downloadDataUrl || res.downloadUrl)) {
           updateJob(job.id, {
@@ -307,7 +321,10 @@ export function FileUploader() {
           updateJob(job.id, { status: 'error', error: res.error || 'Operation failed.' });
         }
       } catch (err: any) {
-        updateJob(job.id, { status: 'error', error: err.message || 'Network error.' });
+        const msg = err.message === 'Failed to fetch'
+          ? 'Network timeout or connection interrupted. Please try again or use a smaller file.'
+          : (err.message || 'Network error.');
+        updateJob(job.id, { status: 'error', error: msg });
       }
     }
 
