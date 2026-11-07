@@ -603,106 +603,599 @@ export async function cleanupOldFiles() {
   }
 }
 
-// ─── Pure JS Text/DOCX to PDF Generator ──────────────────────────────────────
+// ─── Pure JS HTML/Text/DOCX to Vector PDF & HTML Generators ────────────────────
 
-/** Convert extracted plain text or DOCX text into a structured, multi-page A4 PDF */
-async function convertTextOrDocxToPdf(
-  text: string,
+function escapeHtml(str: string): string {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function wrapInA4Template(body: string, title?: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(title || 'Document')}</title>
+  <style>
+    @page { size: A4; margin: 20mm; }
+    * { box-sizing: border-box; }
+    body {
+      font-family: 'Liberation Serif', 'Times New Roman', Georgia, serif;
+      background-color: #f3f4f6;
+      margin: 0;
+      padding: 2rem 1rem;
+      color: #111827;
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+    .page {
+      background: #ffffff;
+      width: 210mm;
+      min-height: 297mm;
+      margin: 0 auto 2rem auto;
+      padding: 25mm 20mm;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12);
+      border-radius: 2px;
+    }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    th, td { padding: 0.4rem 0.6rem; vertical-align: top; }
+    img { max-width: 100%; height: auto; display: block; margin: 1rem auto; }
+    @media print {
+      body { background: transparent; padding: 0; }
+      .page { width: 100%; min-height: auto; margin: 0; padding: 0; box-shadow: none; border-radius: 0; page-break-after: always; }
+    }
+  </style>
+</head>
+<body>
+  ${body}
+</body>
+</html>`;
+}
+
+/** High-Fidelity PDF to HTML converter with embedded images, flexbox split rows, and A4 print styling */
+async function convertPdfToHtmlPureJs(inputPath: string, outputPath: string): Promise<void> {
+  const pdfBytes = await fs.promises.readFile(inputPath);
+  const imagesByPage = await extractImagesFromPdf(pdfBytes);
+
+  const PDFParser = require('pdf2json');
+  const parser = new PDFParser(null, 1);
+  const pdfData: any = await new Promise((resolve) => {
+    parser.on('pdfParser_dataReady', (data: any) => resolve(data));
+    parser.on('pdfParser_dataError', () => resolve(null));
+    parser.loadPDF(inputPath);
+  });
+
+  const totalPages = pdfData?.Pages?.length || 1;
+  const pageSections: string[] = [];
+
+  for (let pIdx = 0; pIdx < totalPages; pIdx++) {
+    const pageData = pdfData?.Pages?.[pIdx];
+    const pageImages = imagesByPage.get(pIdx) || [];
+    const pageWidth = pageData?.Width || 37;
+    const hLines = pageData?.HLines || [];
+
+    const pageElements: string[] = [];
+
+    // Embedded images
+    for (const img of pageImages) {
+      const b64 = img.buffer.toString('base64');
+      pageElements.push(
+        `<div style="text-align: center; margin: 1.5rem 0;">` +
+        `<img src="data:image/png;base64,${b64}" style="max-width: 100%; max-height: 400px; height: auto; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.08);" />` +
+        `</div>`
+      );
+    }
+
+    if (pageData?.Texts && pageData.Texts.length > 0) {
+      // Group text items by line Y coordinate
+      const linesMap = new Map<number, any[]>();
+      for (const t of pageData.Texts) {
+        const yKey = Math.round(t.y * 5) / 5;
+        if (!linesMap.has(yKey)) linesMap.set(yKey, []);
+        linesMap.get(yKey)!.push(t);
+      }
+
+      const sortedYs = Array.from(linesMap.keys()).sort((a, b) => a - b);
+      const rawLines = sortedYs.map(y => {
+        const items = linesMap.get(y)!.sort((a, b) => a.x - b.x);
+        return { y, items };
+      });
+
+      for (let i = 0; i < rawLines.length; i++) {
+        const line = rawLines[i];
+        const items = line.items;
+
+        // Check for 2-column split row
+        if (items.length >= 2) {
+          const first = items[0];
+          const last = items[items.length - 1];
+          const gap = last.x - (first.x + (first.w || 5));
+          if (first.x < 10 && last.x > 18 && gap > 4) {
+            let leftHtml = '';
+            for (let itIdx = 0; itIdx < items.length - 1; itIdx++) {
+              for (const r of items[itIdx].R) {
+                let t = '';
+                try { t = decodeURIComponent(r.T); } catch { t = r.T; }
+                const isB = r.TS?.[2] === 1;
+                const isI = r.TS?.[3] === 1;
+                if (isB && isI) leftHtml += `<strong><em>${escapeHtml(t)}</em></strong> `;
+                else if (isB) leftHtml += `<strong>${escapeHtml(t)}</strong> `;
+                else if (isI) leftHtml += `<em>${escapeHtml(t)}</em> `;
+                else leftHtml += `${escapeHtml(t)} `;
+              }
+            }
+
+            let rightHtml = '';
+            for (const r of last.R) {
+              let t = '';
+              try { t = decodeURIComponent(r.T); } catch { t = r.T; }
+              const isB = r.TS?.[2] === 1;
+              const isI = r.TS?.[3] === 1;
+              if (isB && isI) rightHtml += `<strong><em>${escapeHtml(t)}</em></strong> `;
+              else if (isB) rightHtml += `<strong>${escapeHtml(t)}</strong> `;
+              else if (isI) rightHtml += `<em>${escapeHtml(t)}</em> `;
+              else rightHtml += `${escapeHtml(t)} `;
+            }
+
+            pageElements.push(
+              `<div style="display: flex; justify-content: space-between; align-items: baseline; margin: 0.4rem 0;">` +
+              `<div style="flex: 1;">${leftHtml.trim()}</div>` +
+              `<div style="text-align: right; color: #374151;">${rightHtml.trim()}</div>` +
+              `</div>`
+            );
+            continue;
+          }
+        }
+
+        let fullLineText = '';
+        const rawRuns: { text: string; bold: boolean; italics: boolean; size: number }[] = [];
+        for (const item of items) {
+          if (!item.R) continue;
+          for (const r of item.R) {
+            let txt = '';
+            try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
+            if (!txt) continue;
+            fullLineText += txt;
+            rawRuns.push({
+              text: txt,
+              bold: r.TS?.[2] === 1,
+              italics: r.TS?.[3] === 1,
+              size: r.TS?.[1] || 14
+            });
+          }
+        }
+
+        const trimmed = fullLineText.trim();
+        if (!trimmed) continue;
+
+        const firstItem = items[0];
+        const totalW = items[items.length - 1].x + (items[items.length - 1].w || 2) - firstItem.x;
+        const isCentered = firstItem.x > 7 && (firstItem.x + totalW < pageWidth - 5);
+
+        const isUpper = trimmed === trimmed.toUpperCase() && /[A-Z]/.test(trimmed) && trimmed.length > 4;
+        const hasHLineBelow = hLines.some((hl: any) => Math.abs(hl.y - (line.y + 1.25)) < 1.0);
+        const isSectionHeading = (rawRuns.every(r => r.bold) && isUpper && trimmed.length < 60) || hasHLineBelow;
+        const isBullet = trimmed.startsWith('•') || trimmed.startsWith('- ') || trimmed.startsWith('* ');
+
+        if (isSectionHeading) {
+          const headingText = rawRuns.map(r => r.text).join(' ').trim();
+          pageElements.push(
+            `<h2 style="font-size: 13pt; font-weight: bold; text-transform: uppercase; border-bottom: 1.5px solid #000; padding-bottom: 3px; margin: 1.6rem 0 0.5rem 0; color: #000; letter-spacing: 0.5px;">` +
+            `${escapeHtml(headingText)}` +
+            `</h2>`
+          );
+        } else if (isCentered) {
+          let inner = '';
+          for (const r of rawRuns) {
+            let seg = escapeHtml(r.text);
+            if (r.bold && r.italics) seg = `<strong><em>${seg}</em></strong>`;
+            else if (r.bold) seg = `<strong>${seg}</strong>`;
+            else if (r.italics) seg = `<em>${seg}</em>`;
+            inner += seg + ' ';
+          }
+          const fontSizeStyle = rawRuns[0]?.size > 18 ? 'font-size: 18pt; font-weight: bold;' : 'font-size: 10.5pt;';
+          pageElements.push(
+            `<div style="text-align: center; margin: 0.25rem 0; ${fontSizeStyle} color: #000;">${inner.trim()}</div>`
+          );
+        } else if (isBullet) {
+          let cleanText = trimmed.replace(/^[•\-\*]\s*/, '');
+          pageElements.push(
+            `<ul style="margin: 0.35rem 0; padding-left: 1.6rem;"><li style="margin-bottom: 0.25rem; line-height: 1.5; color: #111;">${escapeHtml(cleanText)}</li></ul>`
+          );
+        } else {
+          // Flowing paragraph with continuation merging
+          let fullRuns = [...rawRuns];
+          let lastLineY = line.y;
+
+          while (i + 1 < rawLines.length) {
+            const nextLine = rawLines[i + 1];
+            const nextItems = nextLine.items;
+            const nextFirst = nextItems[0];
+            const deltaY = nextLine.y - lastLineY;
+
+            let nextFull = '';
+            for (const it of nextItems) {
+              if (it.R) {
+                for (const r of it.R) {
+                  try { nextFull += decodeURIComponent(r.T); } catch { nextFull += r.T; }
+                }
+              }
+            }
+            const nextTrimmed = nextFull.trim();
+            const isNextHeading = (nextTrimmed === nextTrimmed.toUpperCase() && /[A-Z]/.test(nextTrimmed) && nextTrimmed.length > 4) || hLines.some((hl: any) => Math.abs(hl.y - (nextLine.y + 1.25)) < 1.0);
+            const isNextBullet = nextTrimmed.startsWith('•') || nextTrimmed.startsWith('- ');
+            const isNextSplit = nextItems.length >= 2 && nextItems[0].x < 10 && nextItems[nextItems.length - 1].x > 18;
+
+            if (deltaY < 1.6 && Math.abs(nextFirst.x - firstItem.x) < 0.8 && !isNextHeading && !isNextBullet && !isNextSplit) {
+              for (const it of nextItems) {
+                if (it.R) {
+                  for (const r of it.R) {
+                    let txt = '';
+                    try { txt = decodeURIComponent(r.T); } catch { txt = r.T; }
+                    fullRuns.push({
+                      text: txt,
+                      bold: r.TS?.[2] === 1,
+                      italics: r.TS?.[3] === 1,
+                      size: r.TS?.[1] || 14
+                    });
+                  }
+                }
+              }
+              lastLineY = nextLine.y;
+              i++;
+            } else {
+              break;
+            }
+          }
+
+          let pContent = '';
+          for (const r of fullRuns) {
+            let seg = escapeHtml(r.text);
+            if (r.bold && r.italics) seg = `<strong><em>${seg}</em></strong>`;
+            else if (r.bold) seg = `<strong>${seg}</strong>`;
+            else if (r.italics) seg = `<em>${seg}</em>`;
+            pContent += seg + ' ';
+          }
+
+          pageElements.push(
+            `<p style="margin: 0.6rem 0; line-height: 1.6; text-align: justify; color: #111;">${pContent.trim()}</p>`
+          );
+        }
+      }
+    }
+
+    pageSections.push(
+      `<div class="page">\n${pageElements.join('\n')}\n</div>`
+    );
+  }
+
+  const fullHtml = wrapInA4Template(pageSections.join('\n\n'), path.basename(inputPath));
+  await fs.promises.writeFile(outputPath, fullHtml, 'utf8');
+}
+
+/** Universal Vector PDF generator from HTML or structured text (preserves layout, images, tables, headings, styles) */
+async function convertHtmlOrRichTextToPdf(
+  htmlOrText: string,
   outputPath: string,
   title?: string
 ): Promise<void> {
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const boldFont = await doc.embedFont(StandardFonts.HelveticaBold);
+  const italicFont = await doc.embedFont(StandardFonts.HelveticaOblique);
+  const boldItalicFont = await doc.embedFont(StandardFonts.HelveticaBoldOblique);
 
   let page = doc.addPage(PageSizes.A4);
   const { width, height } = page.getSize();
   const margin = 50;
   const maxWidth = width - margin * 2;
   let y = height - margin;
-  const fontSize = 11;
-  const lineHeight = 16;
 
-  if (title) {
-    const cleanTitle = title.replace(/[^\x20-\x7E]/g, ' ').trim();
-    if (cleanTitle) {
-      page.drawText(cleanTitle, {
-        x: margin,
-        y,
-        size: 16,
-        font: boldFont,
-        color: rgb(0.1, 0.15, 0.3),
-      });
-      y -= 26;
+  function ensurePageSpace(needed = 20) {
+    if (y - needed < margin) {
+      page = doc.addPage(PageSizes.A4);
+      y = height - margin;
     }
   }
 
-  const cleanText = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  const paragraphs = cleanText.split('\n');
+  const isHtml = /<(h[1-6]|p|table|ul|ol|hr|img|div|br)/i.test(htmlOrText);
 
-  for (const rawPara of paragraphs) {
-    const para = rawPara.replace(/[^\x20-\x7E\t]/g, ' ').trim();
-    if (!para) {
-      y -= lineHeight * 0.5;
-      continue;
+  if (isHtml) {
+    const blockRegex = /<(h[1-6]|p|table|ul|ol|hr|img|div)[^>]*>[\s\S]*?<\/\1>|<hr\s*\/?>|<img[^>]*\/?>/gi;
+    let match;
+    const blocks: string[] = [];
+    while ((match = blockRegex.exec(htmlOrText)) !== null) {
+      blocks.push(match[0]);
     }
 
-    const isHeading = (para.length < 50 && (para.endsWith(':') || para === para.toUpperCase())) || para.startsWith('#');
-    const displayPara = para.replace(/^#+\s*/, '');
-    const currentFont = isHeading ? boldFont : font;
-    const currentSize = isHeading ? 13 : fontSize;
-    const currentLineHeight = isHeading ? 19 : lineHeight;
+    if (blocks.length === 0) {
+      const clean = htmlOrText.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      blocks.push(`<p>${clean}</p>`);
+    }
 
-    const words = displayPara.split(/\s+/);
-    let currentLine = '';
+    for (const block of blocks) {
+      // 1. Embedded Image
+      if (/^<img/i.test(block)) {
+        const srcMatch = block.match(/src=["']([^"']+)["']/i);
+        if (srcMatch && srcMatch[1]) {
+          const src = srcMatch[1];
+          try {
+            let imgBuffer: Buffer | null = null;
+            if (src.startsWith('data:image/')) {
+              const b64 = src.split(',')[1];
+              if (b64) imgBuffer = Buffer.from(b64, 'base64');
+            } else if (fs.existsSync(src)) {
+              imgBuffer = await fs.promises.readFile(src);
+            }
 
-    for (const word of words) {
-      const testLine = currentLine ? `${currentLine} ${word}` : word;
-      let testWidth = 0;
-      try {
-        testWidth = currentFont.widthOfTextAtSize(testLine, currentSize);
-      } catch {
-        testWidth = testLine.length * currentSize * 0.6;
-      }
-
-      if (testWidth > maxWidth) {
-        if (y - currentLineHeight < margin) {
-          page = doc.addPage(PageSizes.A4);
-          y = height - margin;
+            if (imgBuffer) {
+              const pngBuf = await sharp(imgBuffer).png().toBuffer();
+              const emb = await doc.embedPng(pngBuf);
+              let imgW = emb.width;
+              let imgH = emb.height;
+              if (imgW > maxWidth) {
+                imgH = Math.round(imgH * (maxWidth / imgW));
+                imgW = maxWidth;
+              }
+              if (imgH > 350) {
+                imgW = Math.round(imgW * (350 / imgH));
+                imgH = 350;
+              }
+              ensurePageSpace(imgH + 20);
+              page.drawImage(emb, {
+                x: margin + Math.max(0, (maxWidth - imgW) / 2),
+                y: y - imgH,
+                width: imgW,
+                height: imgH
+              });
+              y -= imgH + 16;
+            }
+          } catch {}
         }
-        try {
-          page.drawText(currentLine, {
-            x: margin,
-            y,
-            size: currentSize,
-            font: currentFont,
-            color: isHeading ? rgb(0.1, 0.15, 0.25) : rgb(0.15, 0.15, 0.15),
-          });
-        } catch {}
-        y -= currentLineHeight;
-        currentLine = word;
-      } else {
-        currentLine = testLine;
+        continue;
+      }
+
+      // 2. Headings (h1, h2, h3)
+      if (/^<h1/i.test(block)) {
+        const text = block.replace(/<[^>]+>/g, '').replace(/[^\x20-\x7E]/g, ' ').trim();
+        if (text) {
+          ensurePageSpace(32);
+          const isCentered = /text-align:\s*center/i.test(block);
+          let textW = 0;
+          try { textW = boldFont.widthOfTextAtSize(text, 18); } catch { textW = text.length * 11; }
+          const xPos = isCentered ? margin + Math.max(0, (maxWidth - textW) / 2) : margin;
+          page.drawText(text, { x: xPos, y, size: 18, font: boldFont, color: rgb(0, 0, 0) });
+          y -= 26;
+        }
+        continue;
+      }
+
+      if (/^<h[2-6]/i.test(block)) {
+        const text = block.replace(/<[^>]+>/g, '').replace(/[^\x20-\x7E]/g, ' ').trim();
+        if (text) {
+          ensurePageSpace(26);
+          page.drawText(text, { x: margin, y, size: 13, font: boldFont, color: rgb(0, 0, 0) });
+          y -= 20;
+        }
+        continue;
+      }
+
+      // 3. Horizontal Rule
+      if (/^<hr/i.test(block)) {
+        ensurePageSpace(14);
+        page.drawLine({
+          start: { x: margin, y: y + 4 },
+          end: { x: width - margin, y: y + 4 },
+          thickness: 1,
+          color: rgb(0.1, 0.1, 0.1)
+        });
+        y -= 14;
+        continue;
+      }
+
+      // 4. Tables
+      if (/^<table/i.test(block)) {
+        const rows = block.match(/<tr[^>]*>[\s\S]*?<\/tr>/gi) || [];
+        for (const row of rows) {
+          const cells = row.match(/<(td|th)[^>]*>[\s\S]*?<\/\1>/gi) || [];
+          if (cells.length >= 2 && cells[0] && cells[1]) {
+            const cell0 = cells[0];
+            const cell1 = cells[1];
+            const c1Text = cell0.replace(/<[^>]+>/g, '').replace(/[^\x20-\x7E]/g, ' ').trim();
+            const c2Text = cell1.replace(/<[^>]+>/g, '').replace(/[^\x20-\x7E]/g, ' ').trim();
+            const c1IsBold = /<strong>|<b>/i.test(cell0);
+            const c1IsItalic = /<em>|<i>/i.test(cell0);
+            const c1Font = c1IsBold ? boldFont : (c1IsItalic ? italicFont : font);
+
+            ensurePageSpace(20);
+            page.drawText(c1Text, { x: margin, y, size: 10.5, font: c1Font, color: rgb(0, 0, 0) });
+            if (c2Text) {
+              let c2W = 0;
+              try { c2W = font.widthOfTextAtSize(c2Text, 10.5); } catch { c2W = c2Text.length * 6; }
+              page.drawText(c2Text, { x: width - margin - c2W, y, size: 10.5, font, color: rgb(0, 0, 0) });
+            }
+            y -= 16;
+          } else if (cells.length === 1 && cells[0]) {
+            const cell0 = cells[0];
+            const c1Text = cell0.replace(/<[^>]+>/g, '').replace(/[^\x20-\x7E]/g, ' ').trim();
+            const c1IsItalic = /<em>|<i>/i.test(cell0);
+            ensurePageSpace(20);
+            page.drawText(c1Text, { x: margin, y, size: 10, font: c1IsItalic ? italicFont : font, color: rgb(0, 0, 0) });
+            y -= 16;
+          }
+        }
+        y -= 6;
+        continue;
+      }
+
+      // 5. Lists (ul, ol, li)
+      if (/^<ul|^<ol/i.test(block)) {
+        const items = block.match(/<li[^>]*>[\s\S]*?<\/li>/gi) || [];
+        for (const item of items) {
+          const itemText = item.replace(/<[^>]+>/g, '').replace(/[^\x20-\x7E]/g, ' ').trim();
+          const words = itemText.split(/\s+/);
+          let curLine = '';
+          let isFirst = true;
+
+          for (const w of words) {
+            const test = curLine ? `${curLine} ${w}` : w;
+            let wWidth = 0;
+            try { wWidth = font.widthOfTextAtSize(test, 10); } catch { wWidth = test.length * 6; }
+            if (wWidth > maxWidth - 24 && curLine) {
+              ensurePageSpace(16);
+              if (isFirst) {
+                page.drawText('•', { x: margin + 8, y, size: 11, font: boldFont, color: rgb(0, 0, 0) });
+                isFirst = false;
+              }
+              page.drawText(curLine, { x: margin + 22, y, size: 10, font, color: rgb(0, 0, 0) });
+              y -= 14;
+              curLine = w;
+            } else {
+              curLine = test;
+            }
+          }
+          if (curLine) {
+            ensurePageSpace(16);
+            if (isFirst) {
+              page.drawText('•', { x: margin + 8, y, size: 11, font: boldFont, color: rgb(0, 0, 0) });
+            }
+            page.drawText(curLine, { x: margin + 22, y, size: 10, font, color: rgb(0, 0, 0) });
+            y -= 16;
+          }
+        }
+        y -= 4;
+        continue;
+      }
+
+      // 6. Paragraphs and Blocks
+      if (/^<p|^<div/i.test(block)) {
+        const isCentered = /text-align:\s*center/i.test(block);
+        const cleanPara = block.replace(/<br\s*\/?>/gi, '\n');
+        const innerHtml = cleanPara.replace(/^<[^>]+>/, '').replace(/<\/[^>]+>$/, '');
+
+        const runRegex = /(<strong>[\s\S]*?<\/strong>|<b>[\s\S]*?<\/b>|<em>[\s\S]*?<\/em>|<i>[\s\S]*?<\/i>|[^<]+)/gi;
+        let runMatch;
+        const runs: { text: string; isBold: boolean; isItalic: boolean }[] = [];
+        while ((runMatch = runRegex.exec(innerHtml)) !== null) {
+          const seg = runMatch[0];
+          if (!seg) continue;
+          const isBold = /^<(strong|b)/i.test(seg);
+          const isItalic = /^<(em|i)/i.test(seg);
+          const txt = seg.replace(/<[^>]+>/g, '').replace(/[^\x20-\x7E]/g, ' ');
+          if (txt) {
+            runs.push({ text: txt, isBold, isItalic });
+          }
+        }
+
+        let currentLineRuns: { text: string; font: any; width: number }[] = [];
+        let currentLineWidth = 0;
+
+        for (const run of runs) {
+          const runWords = run.text.split(/(\s+)/);
+          const rFont = run.isBold ? (run.isItalic ? boldItalicFont : boldFont) : (run.isItalic ? italicFont : font);
+
+          for (const token of runWords) {
+            if (!token) continue;
+            let tokenWidth = 0;
+            try { tokenWidth = rFont.widthOfTextAtSize(token, 10.5); } catch { tokenWidth = token.length * 6; }
+
+            if (currentLineWidth + tokenWidth > maxWidth && currentLineRuns.length > 0 && token.trim().length > 0) {
+              ensurePageSpace(16);
+              let startX = isCentered ? margin + Math.max(0, (maxWidth - currentLineWidth) / 2) : margin;
+              for (const r of currentLineRuns) {
+                page.drawText(r.text, { x: startX, y, size: 10.5, font: r.font, color: rgb(0, 0, 0) });
+                startX += r.width;
+              }
+              y -= 15;
+              currentLineRuns = [];
+              currentLineWidth = 0;
+            }
+
+            currentLineRuns.push({ text: token, font: rFont, width: tokenWidth });
+            currentLineWidth += tokenWidth;
+          }
+        }
+
+        if (currentLineRuns.length > 0) {
+          ensurePageSpace(16);
+          let startX = isCentered ? margin + Math.max(0, (maxWidth - currentLineWidth) / 2) : margin;
+          for (const r of currentLineRuns) {
+            page.drawText(r.text, { x: startX, y, size: 10.5, font: r.font, color: rgb(0, 0, 0) });
+            startX += r.width;
+          }
+          y -= 18;
+        }
+      }
+    }
+  } else {
+    // Plain text layout
+    if (title) {
+      const cleanTitle = title.replace(/[^\x20-\x7E]/g, ' ').trim();
+      if (cleanTitle) {
+        ensurePageSpace(30);
+        page.drawText(cleanTitle, { x: margin, y, size: 16, font: boldFont, color: rgb(0, 0, 0) });
+        y -= 26;
       }
     }
 
-    if (currentLine) {
-      if (y - currentLineHeight < margin) {
-        page = doc.addPage(PageSizes.A4);
-        y = height - margin;
+    const lines = htmlOrText.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    for (const rawLine of lines) {
+      const line = rawLine.replace(/[^\x20-\x7E\t]/g, ' ').trim();
+      if (!line) {
+        y -= 10;
+        continue;
       }
-      try {
-        page.drawText(currentLine, {
-          x: margin,
-          y,
-          size: currentSize,
-          font: currentFont,
-          color: isHeading ? rgb(0.1, 0.15, 0.25) : rgb(0.15, 0.15, 0.15),
-        });
-      } catch {}
-      y -= currentLineHeight;
+
+      if (/^---+$|^===+$/.test(line)) {
+        ensurePageSpace(14);
+        page.drawLine({ start: { x: margin, y: y + 4 }, end: { x: width - margin, y: y + 4 }, thickness: 1, color: rgb(0.2, 0.2, 0.2) });
+        y -= 14;
+        continue;
+      }
+
+      const isHeading = line.startsWith('#') || (line.length < 50 && line === line.toUpperCase() && /[A-Z]/.test(line));
+      const isBullet = line.startsWith('•') || line.startsWith('- ') || line.startsWith('* ');
+      const curFont = isHeading ? boldFont : font;
+      const curSize = isHeading ? 13 : 10.5;
+      const curLineHeight = isHeading ? 19 : 15;
+
+      const cleanLine = line.replace(/^#+\s*|^[•\-\*]\s*/, '');
+      const words = cleanLine.split(/\s+/);
+      let curText = '';
+      let isFirstWord = true;
+
+      for (const w of words) {
+        const test = curText ? `${curText} ${w}` : w;
+        let testWidth = 0;
+        try { testWidth = curFont.widthOfTextAtSize(test, curSize); } catch { testWidth = test.length * curSize * 0.6; }
+
+        if (testWidth > maxWidth - (isBullet ? 20 : 0)) {
+          ensurePageSpace(curLineHeight);
+          if (isBullet && isFirstWord) {
+            page.drawText('•', { x: margin + 6, y, size: 11, font: boldFont, color: rgb(0, 0, 0) });
+            isFirstWord = false;
+          }
+          page.drawText(curText, { x: margin + (isBullet ? 20 : 0), y, size: curSize, font: curFont, color: rgb(0, 0, 0) });
+          y -= curLineHeight;
+          curText = w;
+        } else {
+          curText = test;
+        }
+      }
+
+      if (curText) {
+        ensurePageSpace(curLineHeight);
+        if (isBullet && isFirstWord) {
+          page.drawText('•', { x: margin + 6, y, size: 11, font: boldFont, color: rgb(0, 0, 0) });
+        }
+        page.drawText(curText, { x: margin + (isBullet ? 20 : 0), y, size: curSize, font: curFont, color: rgb(0, 0, 0) });
+        y -= curLineHeight + (isHeading ? 6 : 3);
+      }
     }
-    y -= 4;
   }
 
   const pdfBytes = await doc.save();
@@ -861,17 +1354,10 @@ export async function convertFile(
       return;
     }
 
-    // PDF to HTML
+    // PDF to HTML (High Fidelity with images, split rows, headings, and A4 print styling)
     if (targetFormat === 'html') {
-      const pages = await extractPdfData(inputPath);
-      const htmlBody = pages.map((lines, i) => `
-        <div class="page" style="margin-bottom: 2rem; padding: 2rem; background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.1); border-radius: 8px;">
-          <div style="font-size: 0.8rem; color: #888; margin-bottom: 1rem;">Page ${i + 1}</div>
-          ${lines.map(l => `<p style="margin: 0.5rem 0; line-height: 1.6;">${l.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`).join('')}
-        </div>
-      `).join('');
-      const fullHtml = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Converted Document</title><style>body{font-family:system-ui,sans-serif;background:#f3f4f6;padding:2rem;max-width:800px;margin:auto;}</style></head><body>${htmlBody}</body></html>`;
-      await fs.promises.writeFile(outputPath, fullHtml, 'utf8');
+      setProgress(jobId, 40);
+      await convertPdfToHtmlPureJs(inputPath, outputPath);
       setProgress(jobId, 100);
       return;
     }
@@ -895,7 +1381,8 @@ export async function convertFile(
     }
     if (targetFormat === 'html') {
       const result = await mammoth.convertToHtml({ path: inputPath });
-      const html = `<html><head><style>body{font-family:sans-serif;padding:2rem;}</style></head><body>${result.value}</body></html>`;
+      const originalName = path.basename(inputPath, path.extname(inputPath));
+      const html = wrapInA4Template(result.value, originalName);
       await fs.promises.writeFile(outputPath, html);
       setProgress(jobId, 100);
       return;
@@ -930,32 +1417,21 @@ export async function convertFile(
       } catch {}
     }
 
-    // Pure JS Fallback using Mammoth + pdf-lib (runs on Vercel without LibreOffice or Edge)
+    // High-Fidelity Pure JS Fallback: Mammoth (extracts HTML with embedded images, tables, bold, italics, headings) + Vector PDF generator
     setProgress(jobId, 50);
     const mammoth = await import('mammoth');
-    const result = await mammoth.extractRawText({ path: inputPath });
-    const text = result.value || 'Converted Document (Empty)';
+    const result = await mammoth.convertToHtml({ path: inputPath });
     const originalName = path.basename(inputPath, path.extname(inputPath));
-    await convertTextOrDocxToPdf(text, outputPath, originalName);
+    await convertHtmlOrRichTextToPdf(result.value, outputPath, originalName);
     setProgress(jobId, 100);
     return;
   }
 
   // ── TXT / HTML → PDF via pure pdf-lib ───────────────────────────────────────
   if ((mimeType.includes('text/plain') || mimeType.includes('text/html') || inputExt === 'txt' || inputExt === 'html') && targetFormat === 'pdf') {
-    let content = await fs.promises.readFile(inputPath, 'utf8');
-    if (mimeType.includes('text/html') || inputExt === 'html') {
-      content = content.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-                       .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-                       .replace(/<[^>]+>/g, '\n')
-                       .replace(/&nbsp;/g, ' ')
-                       .replace(/&amp;/g, '&')
-                       .replace(/&lt;/g, '<')
-                       .replace(/&gt;/g, '>')
-                       .replace(/&quot;/g, '"');
-    }
+    const content = await fs.promises.readFile(inputPath, 'utf8');
     const originalName = path.basename(inputPath, path.extname(inputPath));
-    await convertTextOrDocxToPdf(content, outputPath, originalName);
+    await convertHtmlOrRichTextToPdf(content, outputPath, originalName);
     setProgress(jobId, 100);
     return;
   }
@@ -964,13 +1440,48 @@ export async function convertFile(
   if ((mimeType.includes('text/plain') || inputExt === 'txt') && (targetFormat === 'docx' || targetFormat === 'doc')) {
     const content = await fs.promises.readFile(inputPath, 'utf8');
     const lines = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
-    const docChildren = lines.map(line => new Paragraph({
-      children: [new TextRun({ text: line, size: 24 })],
-      spacing: { after: 100 }
-    }));
+    const docChildren: any[] = [];
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) {
+        docChildren.push(new Paragraph({ children: [new TextRun('')], spacing: { after: 80 } }));
+        continue;
+      }
+      if (/^---+$|^===+$/.test(line)) {
+        docChildren.push(new Paragraph({
+          children: [new TextRun('')],
+          border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: '000000', space: 2 } },
+          spacing: { before: 100, after: 100 }
+        }));
+        continue;
+      }
+      const isHeading = line.startsWith('#') || (line.length < 50 && line === line.toUpperCase() && /[A-Z]/.test(line));
+      const isBullet = line.startsWith('•') || line.startsWith('- ') || line.startsWith('* ');
+      if (isHeading) {
+        const cleanText = line.replace(/^#+\s*/, '');
+        docChildren.push(new Paragraph({
+          children: [new TextRun({ text: cleanText, bold: true, size: 28, color: '000000' })],
+          spacing: { before: 200, after: 60 }
+        }));
+      } else if (isBullet) {
+        const cleanText = line.replace(/^[•\-\*]\s*/, '');
+        docChildren.push(new Paragraph({
+          children: [new TextRun({ text: '•  ', bold: true, color: '000000' }), new TextRun({ text: cleanText, size: 24, color: '000000' })],
+          indent: { left: 360, hanging: 360 },
+          spacing: { after: 60 }
+        }));
+      } else {
+        docChildren.push(new Paragraph({
+          children: [new TextRun({ text: line, size: 24, color: '000000' })],
+          spacing: { after: 100 }
+        }));
+      }
+    }
     const doc = new Document({
       sections: [{
-        properties: {},
+        properties: {
+          page: { margin: { top: 720, right: 720, bottom: 720, left: 720 } }
+        },
         children: docChildren.length > 0 ? docChildren : [new Paragraph({ children: [new TextRun('Empty Document')] })]
       }]
     });
